@@ -42,6 +42,7 @@ from darwin_agent.capital.phases import PhaseManager
 from darwin_agent.core.agent import AgentConfig, DarwinAgent
 from darwin_agent.exchanges.router import ExchangeRouter
 from darwin_agent.exchanges.bybit import BybitAdapter
+from darwin_agent.exchanges.binance import BinanceAdapter
 from darwin_agent.evolution.engine import EvolutionEngine
 from darwin_agent.evolution.diagnostics import EvolutionDiagnostics
 from darwin_agent.risk.portfolio_engine import PortfolioRiskEngine, RiskLimits
@@ -95,8 +96,15 @@ def build_exchange_router(config: DarwinConfig) -> ExchangeRouter:
                 api_secret=ex_cfg.api_secret,
                 testnet=ex_cfg.testnet,
             )
-            adapters[eid] = adapter
-        # Add more exchanges here as adapters are built
+        elif eid == ExchangeID.BINANCE:
+            adapter = BinanceAdapter(
+                api_key=ex_cfg.api_key,
+                api_secret=ex_cfg.api_secret,
+                testnet=ex_cfg.testnet,
+            )
+        else:
+            raise RuntimeError(f"Unsupported exchange configured: {eid.value}")
+        adapters[eid] = adapter
         if primary is None:
             primary = eid
 
@@ -104,6 +112,32 @@ def build_exchange_router(config: DarwinConfig) -> ExchangeRouter:
         raise RuntimeError("No exchange adapters enabled in config")
 
     return ExchangeRouter(adapters=adapters, primary=primary)
+
+
+async def validate_exchange_symbol_sync(router: ExchangeRouter, config: DarwinConfig) -> None:
+    """Validate configured symbols exist on Binance futures before trading."""
+    logger = logging.getLogger("darwin.main")
+    for ex_cfg in config.exchanges:
+        if not ex_cfg.enabled or ex_cfg.exchange_id.lower() != ExchangeID.BINANCE.value:
+            continue
+        adapter = router._adapters.get(ExchangeID.BINANCE)
+        if adapter is None:
+            raise RuntimeError("Binance adapter missing while binance exchange is enabled")
+        if not hasattr(adapter, "validate_symbols"):
+            logger.warning("binance adapter does not support symbol validation")
+            continue
+        missing = await adapter.validate_symbols(ex_cfg.symbols)
+        if missing:
+            msg = (
+                "Configured Binance symbols are not tradable/valid: "
+                + ", ".join(missing)
+            )
+            if config.is_live:
+                raise RuntimeError(msg)
+            logger.warning(msg)
+        else:
+            logger.info("binance symbols validated: %s", ", ".join(ex_cfg.symbols))
+
 
 
 def build_risk_engine(config: DarwinConfig) -> PortfolioRiskEngine:
@@ -232,6 +266,8 @@ async def run(config: DarwinConfig):
         for eid, status in statuses.items():
             logger.info("  %s: %s", eid.value,
                         "CONNECTED" if status.connected else "FAILED")
+
+        await validate_exchange_symbol_sync(router, config)
     except Exception as exc:
         logger.error("exchange connection failed: %s", exc)
         if config.is_live:

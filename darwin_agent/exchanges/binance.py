@@ -10,8 +10,8 @@ import hashlib
 import hmac
 import logging
 import time
-from datetime import datetime, timezone
-from typing import Dict, List
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Set
 from urllib.parse import urlencode
 
 from darwin_agent.interfaces.enums import (
@@ -31,6 +31,11 @@ _TF_MAP = {
 }
 
 
+def _normalize_symbol(symbol: str) -> str:
+    # Accept formats like BTC/USDT, btcusdt, BTC-USDT
+    return symbol.replace("/", "").replace("-", "").replace("_", "").upper()
+
+
 class BinanceAdapter:
     """
     Production Binance USDⓈ-M Futures adapter.
@@ -40,7 +45,7 @@ class BinanceAdapter:
     - Hedge mode awareness
     """
 
-    __slots__ = ("_api_key", "_api_secret", "_base_url", "_session", "_testnet")
+    __slots__ = ("_api_key", "_api_secret", "_base_url", "_session", "_testnet", "_symbols_cache", "_symbols_cache_at")
 
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False) -> None:
         self._api_key = api_key
@@ -51,6 +56,8 @@ class BinanceAdapter:
             else "https://fapi.binance.com"
         )
         self._session = None
+        self._symbols_cache: Set[str] = set()
+        self._symbols_cache_at: datetime | None = None
 
     @property
     def exchange_id(self) -> ExchangeID:
@@ -102,11 +109,45 @@ class BinanceAdapter:
                 else:
                     raise
 
+    async def get_exchange_symbols(self, force_refresh: bool = False) -> Set[str]:
+        """Fetch Binance futures tradable symbols and cache briefly."""
+        now = datetime.now(timezone.utc)
+        cache_ttl = timedelta(minutes=5)
+        if (
+            not force_refresh
+            and self._symbols_cache
+            and self._symbols_cache_at is not None
+            and (now - self._symbols_cache_at) <= cache_ttl
+        ):
+            return set(self._symbols_cache)
+
+        data = await self._public("/fapi/v1/exchangeInfo")
+        symbols: Set[str] = set()
+        for item in data.get("symbols", []):
+            if item.get("status") != "TRADING":
+                continue
+            name = item.get("symbol")
+            if name:
+                symbols.add(_normalize_symbol(name))
+        self._symbols_cache = symbols
+        self._symbols_cache_at = now
+        return set(symbols)
+
+    async def validate_symbols(self, symbols: List[str]) -> List[str]:
+        """Return list of symbols not present/tradable on Binance futures."""
+        available = await self.get_exchange_symbols()
+        missing = []
+        for raw in symbols:
+            sym = _normalize_symbol(raw)
+            if sym not in available:
+                missing.append(raw)
+        return missing
+
     # ── IExchangeAdapter ─────────────────────────────────────
 
     async def get_candles(self, symbol: str, timeframe: TimeFrame, limit: int = 100) -> List[Candle]:
         data = await self._public("/fapi/v1/klines", {
-            "symbol": symbol,
+            "symbol": _normalize_symbol(symbol),
             "interval": _TF_MAP.get(timeframe, "15m"),
             "limit": limit,
         })
@@ -121,6 +162,7 @@ class BinanceAdapter:
         ]
 
     async def get_ticker(self, symbol: str) -> Ticker:
+        symbol = _normalize_symbol(symbol)
         data = await self._public("/fapi/v1/ticker/bookTicker", {"symbol": symbol})
         price_data = await self._public("/fapi/v1/ticker/price", {"symbol": symbol})
         return Ticker(
@@ -154,7 +196,7 @@ class BinanceAdapter:
 
     async def place_order(self, request: OrderRequest) -> OrderResult:
         params = {
-            "symbol": request.symbol,
+            "symbol": _normalize_symbol(request.symbol),
             "side": "BUY" if request.side == OrderSide.BUY else "SELL",
             "type": "MARKET" if request.order_type == OrderType.MARKET else "LIMIT",
             "quantity": str(request.quantity),
@@ -162,6 +204,8 @@ class BinanceAdapter:
         if request.price and request.order_type == OrderType.LIMIT:
             params["price"] = str(request.price)
             params["timeInForce"] = "GTC"
+        if request.reduce_only:
+            params["reduceOnly"] = "true"
         data = await self._signed("POST", "/fapi/v1/order", params)
         if "orderId" not in data:
             return OrderResult(
@@ -177,8 +221,9 @@ class BinanceAdapter:
         )
 
     async def close_position(self, symbol: str, side: OrderSide) -> OrderResult:
+        symbol = _normalize_symbol(symbol)
         positions = await self.get_positions()
-        pos = next((p for p in positions if p.symbol == symbol), None)
+        pos = next((p for p in positions if p.symbol == symbol and p.side == side), None)
         if not pos:
             return OrderResult(
                 success=False, error="no_position",
@@ -186,11 +231,16 @@ class BinanceAdapter:
             )
         close_side = "SELL" if side == OrderSide.BUY else "BUY"
         params = {
-            "symbol": symbol, "side": close_side,
+            "symbol": _normalize_symbol(symbol), "side": close_side,
             "type": "MARKET", "quantity": str(pos.size),
             "reduceOnly": "true",
         }
         data = await self._signed("POST", "/fapi/v1/order", params)
+        if "orderId" not in data:
+            return OrderResult(
+                success=False, error=data.get("msg", "unknown"),
+                exchange_id=ExchangeID.BINANCE,
+            )
         return OrderResult(
             order_id=str(data.get("orderId", "")), symbol=symbol,
             side=OrderSide(close_side),
@@ -200,9 +250,11 @@ class BinanceAdapter:
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
         try:
-            await self._signed("POST", "/fapi/v1/leverage", {
-                "symbol": symbol, "leverage": str(leverage),
+            data = await self._signed("POST", "/fapi/v1/leverage", {
+                "symbol": _normalize_symbol(symbol), "leverage": str(leverage),
             })
+            if isinstance(data, dict) and data.get("code", 0) < 0:
+                return False
             return True
         except Exception:
             return False

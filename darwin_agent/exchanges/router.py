@@ -201,11 +201,11 @@ class ExchangeRouter:
         if adapter is None:
             return False
         try:
-            await self._timed(
+            result = await self._timed(
                 adapter.set_leverage(symbol, leverage),
                 f"set_leverage({symbol}@{target.value})",
             )
-            return True
+            return bool(result)
         except Exception as exc:
             logger.warning("set_leverage failed on %s: %s", target.value, exc)
             return False
@@ -227,6 +227,31 @@ class ExchangeRouter:
         if not any_success:
             logger.error("get_balance failed on ALL exchanges — returning 0.0")
         return total
+
+
+    async def close(self) -> None:
+        """Close all adapters that expose an async close() method."""
+        for eid, adapter in self._adapters.items():
+            close = getattr(adapter, "close", None)
+            if close is None:
+                continue
+            try:
+                await self._timed(close(), f"close({eid.value})")
+            except Exception as exc:
+                logger.warning("close failed on %s: %s", eid.value, exc)
+
+    async def connect_all(self) -> None:
+        """Backward-compatible startup hook."""
+        await self.refresh_statuses()
+
+    async def get_all_statuses(self) -> Dict[ExchangeID, ExchangeStatus]:
+        """Backward-compatible status API expected by main entrypoint."""
+        await self.refresh_statuses()
+        return self.get_exchange_statuses()
+
+    async def disconnect_all(self) -> None:
+        """Backward-compatible shutdown hook."""
+        await self.close()
 
     # ── IExchangeRouter specific ─────────────────────────────
 
