@@ -1,0 +1,89 @@
+# ═══════════════════════════════════════════════════════════
+# 🧬 Darwin Agent v4.0 — Docker Compose
+# ═══════════════════════════════════════════════════════════
+# Usage:
+#   docker compose up -d              # Start everything
+#   docker compose logs -f darwin     # Watch agent logs
+#   docker compose down               # Stop
+#   docker compose down -v            # Stop + delete data
+# ═══════════════════════════════════════════════════════════
+
+services:
+  darwin:
+    build: .
+    container_name: darwin-agent
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - darwin-data:/app/data
+      - darwin-logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=UTC
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://darwin:darwin@postgres:5432/darwin
+      - DARWIN_MODE=test
+      # Set API keys here or in config.yaml:
+      # - BYBIT_API_KEY=your_key
+      # - BYBIT_API_SECRET=your_secret
+    ports:
+      - "${DASHBOARD_PORT:-8080}:8080"
+    command: python -m darwin_agent.main --config /app/config.yaml
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  redis:
+    image: redis:7-alpine
+    container_name: darwin-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: darwin-postgres
+    restart: unless-stopped
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=darwin
+      - POSTGRES_PASSWORD=darwin
+      - POSTGRES_DB=darwin
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U darwin"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+volumes:
+  darwin-data:
+  darwin-logs:
+  redis-data:
+  pg-data:

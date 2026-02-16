@@ -1,0 +1,18 @@
+# Darwin Agent v4.0 — Dependencies
+# Core
+aiohttp>=3.9.0              # Async HTTP for exchange APIs
+pyyaml>=6.0                 # Configuration files
+
+# Data / Math
+numpy>=1.24.0               # Numerical computations
+pandas>=2.0.0               # Data manipulation
+
+# Exchange SDKs
+pybit>=5.6.0                # Bybit API SDK
+
+# Infrastructure (optional — enable in config)
+# redis[hiredis]>=5.0.0     # pip install redis[hiredis]
+# asyncpg>=0.29.0           # pip install asyncpg
+
+# Dashboard (optional)
+# aiohttp-jinja2>=1.5       # pip install aiohttp-jinja2

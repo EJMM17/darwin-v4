@@ -1,0 +1,30 @@
+# Darwin v4 — Deterministic Docker Build
+# Pinned Python + numpy + all deps for byte-level reproducibility
+#
+# Build:  docker build -t darwin-v4:deterministic .
+# Run:    docker run --rm darwin-v4:deterministic python reproduce_run.py --seed 42
+# Verify: Output must show "DETERMINISM VERIFIED"
+
+FROM python:3.12.3-slim-bookworm
+
+# Determinism: Single-threaded math libs
+ENV PYTHONHASHSEED=42 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    MKL_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1 \
+    MKL_DYNAMIC=FALSE \
+    OMP_DYNAMIC=FALSE
+
+WORKDIR /app
+
+# Pin ALL versions for reproducibility
+COPY requirements-deterministic.txt .
+RUN pip install --no-cache-dir -r requirements-deterministic.txt
+
+COPY . .
+
+# Default: run determinism verification
+CMD ["python", "reproduce_run.py", "--seed", "42"]

@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Darwin v4 — Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--dim:#8b949e;
+--green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;--accent:#1f6feb}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+background:var(--bg);color:var(--text);min-height:100vh;font-size:14px}
+.login-wrap{display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login-box{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:32px;width:340px}
+.login-box h2{margin-bottom:20px;color:var(--blue);font-size:18px;text-align:center}
+.login-box input{width:100%;padding:10px 12px;margin-bottom:12px;background:var(--bg);border:1px solid var(--border);
+color:var(--text);border-radius:6px;font-size:14px}
+.login-box button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;
+border-radius:6px;cursor:pointer;font-size:14px;font-weight:600}
+.login-box button:hover{background:#388bfd}
+.login-error{color:var(--red);font-size:12px;margin-top:8px;text-align:center}
+header{background:var(--card);border-bottom:1px solid var(--border);padding:12px 24px;
+display:flex;align-items:center;justify-content:space-between}
+header h1{font-size:16px;font-weight:600;color:var(--blue)}
+.status-dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:8px}
+.status-dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+.status-dot.off{background:var(--red)}
+.status-dot.locked{background:var(--yellow);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.header-right{display:flex;align-items:center;gap:16px;font-size:13px;color:var(--dim)}
+.header-right button{background:none;border:1px solid var(--border);color:var(--dim);
+padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px}
+.header-right button:hover{color:var(--text);border-color:var(--text)}
+main{padding:16px 24px;max-width:1200px;margin:0 auto}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+.grid-3{grid-template-columns:repeat(3,1fr)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px}
+.card h3{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px}
+.metric{margin-bottom:10px}
+.metric-label{font-size:11px;color:var(--dim);margin-bottom:2px}
+.metric-value{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+.metric-sm .metric-value{font-size:14px;font-weight:600}
+.positive{color:var(--green)}.negative{color:var(--red)}.warn{color:var(--yellow)}
+.controls{display:flex;gap:8px;flex-wrap:wrap}
+.btn{padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600}
+.btn-start{background:#238636;color:#fff}.btn-start:hover{background:#2ea043}
+.btn-stop{background:var(--border);color:var(--text)}.btn-stop:hover{background:#484f58}
+.btn-danger{background:#da3633;color:#fff}.btn-danger:hover{background:#f85149}
+.btn-warn{background:var(--yellow);color:#000}.btn-warn:hover{background:#e3b341}
+.btn:disabled{opacity:0.4;cursor:not-allowed}
+.chart-container{position:relative;height:200px;background:var(--bg);border-radius:6px;overflow:hidden}
+canvas{width:100%;height:100%}
+.cred-list{font-size:13px}
+.cred-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;
+border-bottom:1px solid var(--border)}
+.cred-row:last-child{border-bottom:none}
+.cred-form{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.cred-form input,.cred-form select{padding:6px 10px;background:var(--bg);border:1px solid var(--border);
+color:var(--text);border-radius:4px;font-size:13px;flex:1;min-width:100px}
+.cred-form button{padding:6px 16px;background:var(--accent);color:#fff;border:none;
+border-radius:4px;cursor:pointer;font-size:13px}
+.alert-box{background:#2d1416;border:1px solid #5a2328;border-radius:6px;padding:10px 14px;
+margin-bottom:10px;font-size:12px;color:var(--red)}
+.exposure-bar{display:flex;gap:4px;margin-top:6px}
+.exp-seg{height:20px;border-radius:3px;font-size:10px;display:flex;align-items:center;
+justify-content:center;color:#fff;min-width:30px}
+.hidden{display:none !important}
+.tab-bar{display:flex;gap:0;margin-bottom:16px;border-bottom:1px solid var(--border)}
+.tab{padding:8px 16px;cursor:pointer;font-size:13px;color:var(--dim);border-bottom:2px solid transparent}
+.tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.tab:hover{color:var(--text)}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="login-page" class="login-wrap">
+  <div class="login-box">
+    <h2>DARWIN v4</h2>
+    <input id="login-user" type="text" placeholder="Username" value="admin">
+    <input id="login-pass" type="password" placeholder="Password">
+    <button onclick="doLogin()">Log In</button>
+    <div id="login-error" class="login-error hidden"></div>
+  </div>
+</div>
+
+<!-- DASHBOARD -->
+<div id="dashboard" class="hidden">
+<header>
+  <div style="display:flex;align-items:center">
+    <span id="status-dot" class="status-dot off"></span>
+    <h1>DARWIN v4</h1>
+    <span id="bot-state" style="margin-left:12px;font-size:12px;color:var(--dim)">STOPPED</span>
+  </div>
+  <div class="header-right">
+    <span id="hdr-equity">$0.00</span>
+    <span id="hdr-dd" class="negative">DD 0%</span>
+    <span id="hdr-uptime" style="color:var(--dim)">0h</span>
+    <button onclick="doLogout()">Logout</button>
+  </div>
+</header>
+
+<main>
+  <!-- TABS -->
+  <div class="tab-bar">
+    <div class="tab active" onclick="showTab('overview')">Overview</div>
+    <div class="tab" onclick="showTab('risk')">Risk</div>
+    <div class="tab" onclick="showTab('credentials')">Credentials</div>
+    <div class="tab" onclick="showTab('events')">Events</div>
+  </div>
+
+  <!-- OVERVIEW TAB -->
+  <div id="tab-overview">
+    <div class="grid">
+      <div class="card">
+        <h3>Equity Curve</h3>
+        <div class="chart-container"><canvas id="eq-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <h3>Key Metrics</h3>
+        <div class="grid grid-3" style="gap:8px">
+          <div class="metric metric-sm"><div class="metric-label">Equity</div><div id="m-equity" class="metric-value">$0</div></div>
+          <div class="metric metric-sm"><div class="metric-label">Peak</div><div id="m-peak" class="metric-value">$0</div></div>
+          <div class="metric metric-sm"><div class="metric-label">Drawdown</div><div id="m-dd" class="metric-value negative">0%</div></div>
+          <div class="metric metric-sm"><div class="metric-label">PnL Today</div><div id="m-pnl" class="metric-value">$0</div></div>
+          <div class="metric metric-sm"><div class="metric-label">Leverage</div><div id="m-lev" class="metric-value">0x</div></div>
+          <div class="metric metric-sm"><div class="metric-label">RBE</div><div id="m-rbe" class="metric-value">1.00</div></div>
+          <div class="metric metric-sm"><div class="metric-label">GMRT</div><div id="m-gmrt" class="metric-value">1.00</div></div>
+          <div class="metric metric-sm"><div class="metric-label">RQRE (days)</div><div id="m-rqre" class="metric-value">30</div></div>
+          <div class="metric metric-sm"><div class="metric-label">Mode</div><div id="m-mode" class="metric-value">—</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Exposure by Symbol</h3>
+        <div id="exposure-bars" class="exposure-bar"></div>
+        <div id="exposure-detail" style="margin-top:10px;font-size:12px;color:var(--dim)"></div>
+      </div>
+      <div class="card">
+        <h3>Execution Quality</h3>
+        <div class="grid grid-3" style="gap:8px">
+          <div class="metric metric-sm"><div class="metric-label">Slippage (bps)</div><div id="m-slip" class="metric-value">0</div></div>
+          <div class="metric metric-sm"><div class="metric-label">Latency P95</div><div id="m-lat" class="metric-value">0ms</div></div>
+          <div class="metric metric-sm"><div class="metric-label">Reject Rate</div><div id="m-rej" class="metric-value">0%</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CONTROLS -->
+    <div class="card">
+      <h3>Bot Controls</h3>
+      <div class="controls">
+        <button id="btn-start" class="btn btn-start" onclick="botStart()">Start (Paper)</button>
+        <button id="btn-start-live" class="btn btn-start" onclick="botStartLive()">Start (Live)</button>
+        <button id="btn-stop" class="btn btn-stop" onclick="botStop()" disabled>Stop</button>
+        <button id="btn-emergency" class="btn btn-danger" onclick="botEmergency()">Emergency Close</button>
+        <button id="btn-unlock" class="btn btn-warn hidden" onclick="botUnlock()">Unlock</button>
+      </div>
+    </div>
+
+    <!-- ALERTS -->
+    <div id="alerts-section" class="hidden" style="margin-top:16px">
+      <div class="card">
+        <h3>Recent Alerts</h3>
+        <div id="alerts-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RISK TAB -->
+  <div id="tab-risk" class="hidden">
+    <div class="grid grid-3">
+      <div class="card"><div class="metric"><div class="metric-label">Max DD (Rolling)</div><div id="r-maxdd" class="metric-value negative">0%</div></div></div>
+      <div class="card"><div class="metric"><div class="metric-label">Current DD</div><div id="r-dd" class="metric-value negative">0%</div></div></div>
+      <div class="card"><div class="metric"><div class="metric-label">Liq Distance</div><div id="r-liq" class="metric-value">100%</div></div></div>
+      <div class="card"><div class="metric"><div class="metric-label">Margin Usage</div><div id="r-margin" class="metric-value">0%</div></div></div>
+      <div class="card"><div class="metric"><div class="metric-label">CB Triggers</div><div id="r-cb" class="metric-value">0</div></div></div>
+      <div class="card"><div class="metric"><div class="metric-label">Halted Bars</div><div id="r-halted" class="metric-value">0</div></div></div>
+    </div>
+    <div class="card" style="margin-top:16px"><h3>Last Alert</h3><div id="r-alert" style="font-size:13px;color:var(--dim)">None</div></div>
+  </div>
+
+  <!-- CREDENTIALS TAB -->
+  <div id="tab-credentials" class="hidden">
+    <div class="card">
+      <h3>API Credentials</h3>
+      <div id="cred-list" class="cred-list"></div>
+      <div class="cred-form">
+        <select id="cred-exchange"><option value="binance">Binance</option><option value="bybit">Bybit</option></select>
+        <input id="cred-key" type="password" placeholder="API Key">
+        <input id="cred-secret" type="password" placeholder="Secret Key">
+        <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--dim)">
+          <input id="cred-testnet" type="checkbox" checked> Testnet
+        </label>
+        <button onclick="addCredential()">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- EVENTS TAB -->
+  <div id="tab-events" class="hidden">
+    <div class="card">
+      <h3>Event Log</h3>
+      <div id="event-list" style="font-size:12px;font-family:monospace;max-height:400px;overflow-y:auto"></div>
+    </div>
+  </div>
+</main>
+</div>
+
+<script>
+let csrf='',ws=null,eqData=[];
+const $=id=>document.getElementById(id);
+
+// ── Auth ──
+async function doLogin(){
+  const u=$('login-user').value,p=$('login-pass').value;
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:u,password:p}),credentials:'same-origin'});
+    const d=await r.json();
+    if(r.ok){csrf=d.csrf_token;$('login-page').classList.add('hidden');$('dashboard').classList.remove('hidden');
+      startWS();loadCredentials();loadEquity();loadEvents();}
+    else{$('login-error').textContent=d.detail||'Failed';$('login-error').classList.remove('hidden');}
+  }catch(e){$('login-error').textContent='Connection failed';$('login-error').classList.remove('hidden');}
+}
+async function doLogout(){
+  await fetch('/api/logout',{method:'POST',credentials:'same-origin'});
+  if(ws)ws.close();location.reload();
+}
+async function checkAuth(){
+  try{const r=await fetch('/api/auth/check',{credentials:'same-origin'});
+    if(r.ok){const d=await r.json();csrf=d.csrf_token;$('login-page').classList.add('hidden');
+      $('dashboard').classList.remove('hidden');startWS();loadCredentials();loadEquity();loadEvents();}
+  }catch(e){}
+}
+checkAuth();
+$('login-pass').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
+
+// ── WebSocket ──
+function startWS(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(proto+'//'+location.host+'/ws/metrics');
+  ws.onmessage=e=>{try{updateUI(JSON.parse(e.data))}catch(ex){}};
+  ws.onclose=()=>{setTimeout(startWS,3000)};
+  ws.onerror=()=>{ws.close()};
+}
+
+// ── UI Update ──
+function updateUI(d){
+  const running=d.running,locked=d.state==='emergency_locked';
+  const dot=$('status-dot');
+  dot.className='status-dot '+(locked?'locked':(running?'on':'off'));
+  $('bot-state').textContent=d.state.toUpperCase();
+  $('hdr-equity').textContent='$'+fmt(d.equity);
+  $('hdr-dd').textContent='DD '+d.drawdown_pct.toFixed(1)+'%';
+  $('hdr-uptime').textContent=(d.uptime_seconds/3600).toFixed(1)+'h';
+
+  $('m-equity').textContent='$'+fmt(d.equity);
+  $('m-peak').textContent='$'+fmt(d.peak_equity);
+  $('m-dd').textContent=d.drawdown_pct.toFixed(1)+'%';
+  $('m-dd').className='metric-value '+(d.drawdown_pct>20?'negative':(d.drawdown_pct>10?'warn':''));
+  $('m-pnl').textContent=(d.pnl_today>=0?'+':'')+d.pnl_today.toFixed(2);
+  $('m-pnl').className='metric-value '+(d.pnl_today>=0?'positive':'negative');
+  $('m-lev').textContent=d.leverage.toFixed(2)+'x';
+  $('m-rbe').textContent=d.rbe_mult.toFixed(2);
+  $('m-gmrt').textContent=d.gmrt_mult.toFixed(2);
+  $('m-rqre').textContent=d.rqre_days_remaining;
+  $('m-mode').textContent=d.mode.toUpperCase();
+
+  $('m-slip').textContent=(d.slippage_mean_bps||0).toFixed(1);
+  $('m-lat').textContent=Math.round(d.latency_p95_ms||0)+'ms';
+  $('m-rej').textContent=(d.reject_rate_pct||0).toFixed(1)+'%';
+  $('m-rej').className='metric-value '+((d.reject_rate_pct||0)>2?'negative':'');
+
+  // Risk tab
+  $('r-maxdd').textContent=d.max_dd_rolling.toFixed(1)+'%';
+  $('r-dd').textContent=d.drawdown_pct.toFixed(1)+'%';
+  $('r-liq').textContent=d.liq_distance_pct.toFixed(1)+'%';
+  $('r-liq').className='metric-value '+((d.liq_distance_pct||100)<20?'negative':'');
+  $('r-margin').textContent=(d.margin_usage_pct||0).toFixed(1)+'%';
+  $('r-cb').textContent=d.cb_triggers||0;
+  $('r-halted').textContent=d.halted_bars||0;
+  $('r-alert').textContent=d.last_alert||'None';
+
+  // Exposure bars
+  const exp=d.exposure_by_symbol||{};
+  const syms=Object.keys(exp).sort();
+  const total=syms.reduce((s,k)=>s+Math.abs(exp[k]),0)||1;
+  const colors=['#58a6ff','#3fb950','#d29922','#f85149','#bc8cff'];
+  let barsHtml='',detHtml='';
+  syms.forEach((s,i)=>{
+    const pct=Math.abs(exp[s])/total*100;
+    barsHtml+=`<div class="exp-seg" style="width:${Math.max(pct,5)}%;background:${colors[i%5]}">${s}</div>`;
+    detHtml+=`<span style="color:${colors[i%5]}">${s}: ${exp[s].toFixed(4)}</span>  `;
+  });
+  $('exposure-bars').innerHTML=barsHtml;
+  $('exposure-detail').innerHTML=detHtml;
+
+  // Alerts
+  if(d.recent_alerts&&d.recent_alerts.length>0){
+    $('alerts-section').classList.remove('hidden');
+    $('alerts-list').innerHTML=d.recent_alerts.map(a=>
+      `<div class="alert-box"><strong>${a.type}</strong> ${a.details}</div>`
+    ).join('');
+  }
+
+  // Controls
+  $('btn-start').disabled=running||locked;
+  $('btn-start-live').disabled=running||locked;
+  $('btn-stop').disabled=!running;
+  $('btn-unlock').classList.toggle('hidden',!locked);
+
+  // Equity chart
+  if(d.equity>0){eqData.push(d.equity);if(eqData.length>300)eqData.shift();drawChart();}
+}
+
+function fmt(v){return v>=1000?v.toFixed(0):v.toFixed(2)}
+
+// ── Chart ──
+function drawChart(){
+  const canvas=$('eq-chart'),ctx=canvas.getContext('2d');
+  const w=canvas.parentElement.offsetWidth,h=canvas.parentElement.offsetHeight;
+  canvas.width=w;canvas.height=h;
+  if(eqData.length<2)return;
+  const mn=Math.min(...eqData)*0.98,mx=Math.max(...eqData)*1.02,rng=mx-mn||1;
+  ctx.clearRect(0,0,w,h);
+  ctx.strokeStyle='#30363d';ctx.lineWidth=0.5;
+  for(let i=0;i<4;i++){const y=h*i/3;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();}
+  ctx.beginPath();ctx.strokeStyle=eqData[eqData.length-1]>=eqData[0]?'#3fb950':'#f85149';ctx.lineWidth=1.5;
+  eqData.forEach((v,i)=>{const x=i/(eqData.length-1)*w,y=h-(v-mn)/rng*h;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)});
+  ctx.stroke();
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0,(eqData[eqData.length-1]>=eqData[0]?'#3fb950':'#f85149')+'20');
+  grad.addColorStop(1,'transparent');
+  ctx.lineTo(w,h);ctx.lineTo(0,h);ctx.fillStyle=grad;ctx.fill();
+  ctx.fillStyle='var(--dim)';ctx.font='10px monospace';
+  ctx.fillText('$'+fmt(mx),4,12);ctx.fillText('$'+fmt(mn),4,h-4);
+}
+
+// ── Tabs ──
+function showTab(name){
+  document.querySelectorAll('[id^=tab-]').forEach(e=>e.classList.add('hidden'));
+  document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
+  $('tab-'+name).classList.remove('hidden');
+  event.target.classList.add('active');
+  if(name==='events')loadEvents();
+  if(name==='credentials')loadCredentials();
+}
+
+// ── Bot Controls ──
+async function apiFetch(url,method='POST',body=null){
+  const opts={method,credentials:'same-origin',headers:{'Content-Type':'application/json','x-csrf-token':csrf}};
+  if(body)opts.body=JSON.stringify(body);
+  const r=await fetch(url,opts);return r.json();
+}
+async function botStart(){const d=await apiFetch('/bot/start','POST',{mode:'paper'});if(!d.ok)alert(d.error)}
+async function botStartLive(){if(!confirm('Start LIVE trading with real capital?'))return;
+  const d=await apiFetch('/bot/start','POST',{mode:'live'});if(!d.ok)alert(d.error)}
+async function botStop(){const d=await apiFetch('/bot/stop');if(!d.ok)alert(d.error)}
+async function botEmergency(){if(!confirm('EMERGENCY CLOSE: Cancel all orders, close all positions, lock bot?'))return;
+  const d=await apiFetch('/bot/emergency-close');if(!d.ok)alert(d.error)}
+async function botUnlock(){const d=await apiFetch('/bot/unlock');if(!d.ok)alert(d.error)}
+
+// ── Credentials ──
+async function loadCredentials(){
+  const r=await fetch('/api/credentials',{credentials:'same-origin'});
+  const d=await r.json();
+  $('cred-list').innerHTML=(d.credentials||[]).map(c=>
+    `<div class="cred-row"><span>${c.exchange} (${c.testnet?'testnet':'live'}) — added ${c.created_at.slice(0,10)}</span>
+     <button class="btn btn-danger" style="padding:4px 10px;font-size:11px" onclick="delCred(${c.id})">Delete</button></div>`
+  ).join('')||'<div style="color:var(--dim);padding:8px 0">No credentials stored</div>';
+}
+async function addCredential(){
+  const d=await apiFetch('/api/credentials','POST',{
+    exchange:$('cred-exchange').value,api_key:$('cred-key').value,
+    secret_key:$('cred-secret').value,testnet:$('cred-testnet').checked});
+  if(d.ok){$('cred-key').value='';$('cred-secret').value='';loadCredentials();}else alert(d.detail||'Failed');
+}
+async function delCred(id){if(!confirm('Delete this credential?'))return;
+  await apiFetch('/api/credentials/'+id,'DELETE');loadCredentials();}
+
+// ── Equity History ──
+async function loadEquity(){
+  try{const r=await fetch('/api/equity-history',{credentials:'same-origin'});
+    const d=await r.json();eqData=(d.history||[]).map(h=>h.equity);drawChart();}catch(e){}}
+
+// ── Events ──
+async function loadEvents(){
+  try{const r=await fetch('/api/events',{credentials:'same-origin'});
+    const d=await r.json();
+    $('event-list').innerHTML=(d.events||[]).map(e=>
+      `<div style="padding:4px 0;border-bottom:1px solid var(--border);color:${e.success?'var(--dim)':'var(--red)'}">
+        ${e.timestamp.slice(0,19)} │ ${e.username} │ ${e.action} │ ${e.ip_address}</div>`
+    ).join('')||'No events';}catch(e){}}
+</script>
+</body>
+</html>

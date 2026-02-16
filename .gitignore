@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data (never commit market data or secrets)
+*.csv
+data/
+logs/
+*.db
+
+# Docker
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Secrets
+.env
+*.pem
+*.key
+config.yaml
+
+# Frozen runs contain equity curves (large)
+# Keep the structure but gitignore large artifacts
+# artifacts/frozen_run_*.json is tracked intentionally for reproducibility

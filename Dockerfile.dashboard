@@ -1,0 +1,43 @@
+# Darwin v4 — Production Image (Bot + Dashboard)
+# Build:  docker build -t darwin-v4:prod -f Dockerfile.dashboard .
+# Run:    docker run -d --name darwin \
+#           -p 8000:8000 \
+#           -e DASHBOARD_SECRET_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())") \
+#           -e DASHBOARD_ADMIN_PASSWORD=<your-password> \
+#           -v darwin-data:/app/data \
+#           -v darwin-logs:/app/logs \
+#           darwin-v4:prod
+
+FROM python:3.12.3-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=42 \
+    MKL_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1
+
+WORKDIR /app
+
+# Install system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libffi-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python deps
+COPY requirements-deterministic.txt ./
+COPY dashboard/requirements.txt ./dashboard-requirements.txt
+RUN pip install --no-cache-dir -r requirements-deterministic.txt && \
+    pip install --no-cache-dir -r dashboard-requirements.txt
+
+# Copy application code
+COPY darwin_agent/ ./darwin_agent/
+COPY dashboard/ ./dashboard/
+
+# Create data and log directories
+RUN mkdir -p /app/data /app/logs/audit
+
+EXPOSE 8000
+
+# Start dashboard (which manages bot lifecycle)
+CMD ["uvicorn", "dashboard.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

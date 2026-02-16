@@ -1,0 +1,81 @@
+# ═══════════════════════════════════════════════════════════
+# 🧬 Darwin Agent v4.0 — Configuration
+# ═══════════════════════════════════════════════════════════
+# Copy to config.yaml and fill in your API keys.
+# All values shown are defaults. Uncomment to override.
+#
+# Environment variables override YAML values:
+#   DARWIN_CAPITAL=50     → capital.starting_capital
+#   DARWIN_MODE=test      → mode
+#   BYBIT_API_KEY=...     → exchanges[0].api_key
+#   BYBIT_API_SECRET=...  → exchanges[0].api_secret
+#   REDIS_URL=...         → infra.redis_url
+#   DATABASE_URL=...      → infra.postgres_dsn
+#   LOG_LEVEL=DEBUG       → infra.log_level
+#   DASHBOARD_PORT=8080   → infra.dashboard_port
+# ═══════════════════════════════════════════════════════════
+
+mode: test  # "test" = testnet/paper, "live" = real money ⚠️
+
+# ── Capital & Growth Phases ──────────────────────────────
+capital:
+  starting_capital: 50.0       # Start with $50
+  bootstrap_target: 100.0      # Phase 1 → 2 at $100
+  scaling_target: 500.0        # Phase 2 → 3 at $500
+  acceleration_target: 2000.0  # Phase 3 → 4 at $2000
+  bootstrap_risk_pct: 2.0      # Conservative in bootstrap
+  scaling_risk_pct: 3.0        # Moderate in scaling
+  acceleration_risk_pct: 4.0   # Aggressive in acceleration
+  consolidation_risk_pct: 1.5  # Protect gains in consolidation
+
+# ── Risk Management ─────────────────────────────────────
+risk:
+  max_position_pct: 2.0        # Max 2% of capital per position
+  max_open_positions: 3         # Max 3 simultaneous positions
+  max_daily_trades: 20
+  max_daily_loss_pct: 5.0      # Stop trading after 5% daily loss
+  stop_loss_pct: 1.5           # Default stop loss
+  take_profit_pct: 3.0         # Default take profit (2:1 R:R)
+  trailing_stop_pct: 1.0       # Trailing stop activation
+  defensive_drawdown_pct: 8.0  # Enter DEFENSIVE state
+  critical_drawdown_pct: 15.0  # Enter CRITICAL state
+  halted_drawdown_pct: 25.0    # HALT all trading
+  max_consecutive_losses: 5
+  max_total_exposure_pct: 80.0
+
+# ── Evolution ────────────────────────────────────────────
+evolution:
+  pool_size: 5                 # Number of concurrent agents
+  survival_rate: 0.5           # Top 50% survive each generation
+  elitism_count: 1             # Best agent always survives
+  tournament_size: 3           # Tournament selection pool
+  mutation_rate: 0.15          # Gene mutation probability
+  mutation_decay: 0.995        # Mutation rate decay per generation
+  crossover_rate: 0.7          # Crossover probability
+  generation_trade_limit: 50   # Trades per generation cycle
+  incubation_trades: 10        # Paper trades before going live
+
+# ── Exchanges ────────────────────────────────────────────
+exchanges:
+  - exchange_id: bybit
+    api_key: ""                # Set via BYBIT_API_KEY env var
+    api_secret: ""             # Set via BYBIT_API_SECRET env var
+    testnet: true              # ⚠️ ALWAYS start with testnet!
+    enabled: true
+    leverage: 20
+    symbols:
+      - BTCUSDT
+      - ETHUSDT
+      - SOLUSDT
+
+# ── Infrastructure ───────────────────────────────────────
+infra:
+  redis_url: "redis://localhost:6379/0"
+  redis_enabled: false         # Enable for checkpoint persistence
+  postgres_dsn: "postgresql://darwin:darwin@localhost:5432/darwin"
+  postgres_enabled: false      # Enable for generation history
+  dashboard_port: 8080
+  dashboard_enabled: true
+  tick_interval: 60.0          # Seconds between trading ticks
+  log_level: INFO
+  log_file: darwin.log
