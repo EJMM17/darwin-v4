@@ -201,11 +201,11 @@ class ExchangeRouter:
         if adapter is None:
             return False
         try:
-            await self._timed(
+            result = await self._timed(
                 adapter.set_leverage(symbol, leverage),
                 f"set_leverage({symbol}@{target.value})",
             )
-            return True
+            return bool(result)
         except Exception as exc:
             logger.warning("set_leverage failed on %s: %s", target.value, exc)
             return False

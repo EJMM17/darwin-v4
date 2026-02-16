@@ -162,6 +162,8 @@ class BinanceAdapter:
         if request.price and request.order_type == OrderType.LIMIT:
             params["price"] = str(request.price)
             params["timeInForce"] = "GTC"
+        if request.reduce_only:
+            params["reduceOnly"] = "true"
         data = await self._signed("POST", "/fapi/v1/order", params)
         if "orderId" not in data:
             return OrderResult(
@@ -178,7 +180,7 @@ class BinanceAdapter:
 
     async def close_position(self, symbol: str, side: OrderSide) -> OrderResult:
         positions = await self.get_positions()
-        pos = next((p for p in positions if p.symbol == symbol), None)
+        pos = next((p for p in positions if p.symbol == symbol and p.side == side), None)
         if not pos:
             return OrderResult(
                 success=False, error="no_position",
@@ -191,6 +193,11 @@ class BinanceAdapter:
             "reduceOnly": "true",
         }
         data = await self._signed("POST", "/fapi/v1/order", params)
+        if "orderId" not in data:
+            return OrderResult(
+                success=False, error=data.get("msg", "unknown"),
+                exchange_id=ExchangeID.BINANCE,
+            )
         return OrderResult(
             order_id=str(data.get("orderId", "")), symbol=symbol,
             side=OrderSide(close_side),
@@ -200,9 +207,11 @@ class BinanceAdapter:
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
         try:
-            await self._signed("POST", "/fapi/v1/leverage", {
+            data = await self._signed("POST", "/fapi/v1/leverage", {
                 "symbol": symbol, "leverage": str(leverage),
             })
+            if isinstance(data, dict) and data.get("code", 0) < 0:
+                return False
             return True
         except Exception:
             return False
