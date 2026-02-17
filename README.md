@@ -118,3 +118,26 @@ Production config (Config C):
 ## License
 
 Proprietary. All rights reserved.
+
+## Headless Runtime (v4 production profile)
+
+Example first-run interaction:
+
+```text
+$ python -m darwin_agent.main --test
+Enter runtime credentials for Darwin Engine:
+binance_api_key: <your-key>
+binance_api_secret: ********
+telegram_bot_token: ********
+telegram_chat_id: 123456789
+equity: 1000.00000000
+leverage confirmation: {'BTCUSDT': True, 'ETHUSDT': True, 'SOLUSDT': True}
+risk percent: 1.0
+test mode completed: no trades opened
+```
+
+Example Dockerfile CMD:
+
+```dockerfile
+CMD ["python", "-m", "darwin_agent.main"]
+```
