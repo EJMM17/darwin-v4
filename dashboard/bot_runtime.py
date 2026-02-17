@@ -93,7 +93,8 @@ class DarwinRuntime:
                 self.config.mode = "test"
                 dashboard_mode = "paper"
 
-            self.controller.update_status(mode=dashboard_mode, state=BotState.STARTING)
+            self.controller.mark_started(mode=dashboard_mode)
+            self.controller.update_status(state=BotState.STARTING)
             self.stop_event.clear()
             self.running = True
             self.thread = threading.Thread(target=self._thread_main, daemon=True, name="darwin-runtime")
@@ -118,6 +119,7 @@ class DarwinRuntime:
         with self._lock:
             self.running = False
 
+        self.controller.mark_stopped(BotState.STOPPED)
         send_telegram_alert("Darwin bot stopped")
         return True
 
@@ -148,6 +150,8 @@ class DarwinRuntime:
             with self._lock:
                 self.loop = None
                 self.running = False
+            if self.controller.status.state not in (BotState.ERROR, BotState.EMERGENCY_LOCKED):
+                self.controller.mark_stopped(BotState.STOPPED)
 
     async def _runtime_main(self) -> None:
         self._main_task = asyncio.create_task(self._engine_wrapper(), name="darwin-main")

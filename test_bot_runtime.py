@@ -130,3 +130,30 @@ def test_runtime_enforces_live_binance_from_dashboard_credentials(monkeypatch, t
     assert runtime.config.exchanges[0].testnet is False
     assert runtime.config.exchanges[0].api_key == "live-key"
     assert runtime.config.exchanges[0].api_secret == "live-secret"
+
+
+def test_runtime_sets_started_at_and_uptime(monkeypatch):
+    import dashboard.bot_runtime as br
+    from dashboard.bot_controller import BotController
+    from darwin_agent.monitoring.execution_audit import ExecutionAudit
+
+    async def fake_run(config):
+        while True:
+            await br.asyncio.sleep(0.05)
+
+    monkeypatch.setattr(br, "darwin_run", fake_run)
+    monkeypatch.setattr(br.DarwinRuntime, "_enforce_live_binance", lambda self: None)
+
+    ctrl = BotController()
+    audit = ExecutionAudit(log_dir="logs/audit-test-uptime")
+    runtime = br.DarwinRuntime(controller=ctrl, audit=audit)
+
+    assert runtime.start(mode="paper") is True
+    time.sleep(0.3)
+
+    status = ctrl.status
+    assert status.mode == "paper"
+    assert status.started_at
+    assert status.uptime_seconds > 0
+
+    assert runtime.stop() is True
