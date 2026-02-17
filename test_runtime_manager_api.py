@@ -29,7 +29,7 @@ def test_start_success(monkeypatch, tmp_path):
     app_mod = _boot_app(monkeypatch, tmp_path)
     import dashboard.bot_runtime as br
 
-    async def fake_run(config):
+    async def fake_run(config, stop_event=None):
         while True:
             await br.asyncio.sleep(0.05)
 
@@ -65,7 +65,7 @@ def test_stop_works(monkeypatch, tmp_path):
     app_mod = _boot_app(monkeypatch, tmp_path)
     import dashboard.bot_runtime as br
 
-    async def fake_run(config):
+    async def fake_run(config, stop_event=None):
         while True:
             await br.asyncio.sleep(0.05)
 

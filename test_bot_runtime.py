@@ -31,7 +31,7 @@ def test_runtime_start_stop_and_no_thread_leak(monkeypatch):
     from dashboard.bot_controller import BotController
     from darwin_agent.monitoring.execution_audit import ExecutionAudit
 
-    async def fake_run(config):
+    async def fake_run(config, stop_event=None):
         while True:
             await br.asyncio.sleep(0.05)
 
@@ -59,7 +59,7 @@ def test_runtime_graceful_cancellation_and_audit_trigger(monkeypatch):
     from dashboard.bot_controller import BotController, BotState
     from darwin_agent.monitoring.execution_audit import ExecutionAudit
 
-    async def broken_run(config):
+    async def broken_run(config, stop_event=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(br, "darwin_run", broken_run)
@@ -137,7 +137,7 @@ def test_runtime_sets_started_at_and_uptime(monkeypatch):
     from dashboard.bot_controller import BotController
     from darwin_agent.monitoring.execution_audit import ExecutionAudit
 
-    async def fake_run(config):
+    async def fake_run(config, stop_event=None):
         while True:
             await br.asyncio.sleep(0.05)
 
@@ -279,7 +279,7 @@ def test_websocket_disconnect_does_not_stop_runtime(monkeypatch, tmp_path):
     reload(dashboard.database)
     reload(dashboard.app)
 
-    async def fake_run(config):
+    async def fake_run(config, stop_event=None):
         while True:
             await br.asyncio.sleep(0.05)
 
