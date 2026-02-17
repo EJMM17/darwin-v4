@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 import argparse
-import json
+import asyncio
 import logging
-import time
+import signal
 from logging.handlers import RotatingFileHandler
-from getpass import getpass
 from pathlib import Path
 from typing import Any
 
-from darwin_agent.core.engine import DarwinCoreEngine, EngineConfig, EquitySnapshot
+from darwin_agent.core.engine import DarwinCoreEngine, EngineConfig
+from darwin_agent.credentials_loader import CredentialsError, load_runtime_credentials
 from darwin_agent.infrastructure.binance_client import BinanceCredentials, BinanceFuturesClient
 from darwin_agent.infrastructure.telegram_notifier import TelegramNotifier
 from darwin_agent.runtime.runtime_service import RuntimeService
 
 
 LOG_PATH = Path("/app/logs/darwin_engine.log")
-CREDENTIALS_PATH = Path("/app/data/runtime_credentials.json")
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 
@@ -41,36 +40,17 @@ def setup_logging() -> logging.Logger:
     return logger
 
 
-def _prompt_credentials() -> dict[str, str]:
-    print("Enter runtime credentials for Darwin Engine:")
-    return {
-        "binance_api_key": input("binance_api_key: ").strip(),
-        "binance_api_secret": getpass("binance_api_secret: ").strip(),
-        "telegram_bot_token": getpass("telegram_bot_token: ").strip(),
-        "telegram_chat_id": input("telegram_chat_id: ").strip(),
-    }
-
-
-def _load_or_prompt_credentials() -> dict[str, str]:
-    if CREDENTIALS_PATH.exists():
-        return json.loads(CREDENTIALS_PATH.read_text())
-    credentials = _prompt_credentials()
-    CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CREDENTIALS_PATH.write_text(json.dumps(credentials, indent=2))
-    return credentials
-
-
-def _create_runtime() -> tuple[RuntimeService, BinanceFuturesClient, TelegramNotifier, DarwinCoreEngine]:
-    creds = _load_or_prompt_credentials()
+def _create_runtime(logger: logging.Logger) -> tuple[RuntimeService, BinanceFuturesClient, TelegramNotifier, DarwinCoreEngine]:
+    creds = load_runtime_credentials(logger)
     binance = BinanceFuturesClient(
         BinanceCredentials(
-            api_key=creds["binance_api_key"],
-            api_secret=creds["binance_api_secret"],
+            api_key=creds.binance_api_key,
+            api_secret=creds.binance_api_secret,
         )
     )
     telegram = TelegramNotifier(
-        bot_token=creds["telegram_bot_token"],
-        chat_id=creds["telegram_chat_id"],
+        bot_token=creds.telegram_bot_token,
+        chat_id=creds.telegram_chat_id,
     )
     engine = DarwinCoreEngine(EngineConfig(risk_percent=1.0, leverage=5))
     runtime = RuntimeService(
@@ -91,57 +71,88 @@ def startup_validation(
     symbols: list[str],
     logger: logging.Logger,
 ) -> dict[str, Any]:
+    logger.info("startup validation begin")
     result = binance.validate_startup(symbols=symbols, leverage=leverage)
-    telegram.send("Darwin Engine successfully connected.")
-    logger.info("validation success")
+    telegram.notify_engine_connected(result)
+    logger.info("startup validation success", extra={"event": "startup_validated", "symbols": len(symbols)})
     return result
 
 
-def run_test_mode(logger: logging.Logger) -> int:
-    runtime, binance, telegram, engine = _create_runtime()
+async def run_test_mode(logger: logging.Logger) -> int:
+    try:
+        runtime, binance, telegram, _ = _create_runtime(logger)
+    except CredentialsError as exc:
+        logger.error("credentials error: %s", exc)
+        return 1
+
     _ = runtime
     try:
-        result = startup_validation(binance, telegram, leverage=5, symbols=DEFAULT_SYMBOLS, logger=logger)
+        result = await asyncio.to_thread(startup_validation, binance, telegram, 5, DEFAULT_SYMBOLS, logger)
         wallet = float(result["wallet_balance"])
         upnl = float(binance.get_unrealized_pnl())
-        equity = EquitySnapshot(wallet_balance=wallet, unrealized_pnl=upnl).equity
+        equity = wallet + upnl
         print(f"equity: {equity:.8f}")
         print("leverage confirmation:", result["leverage_result"])
-        print(f"risk percent: {engine.evaluate(EquitySnapshot(wallet, upnl), []).get('risk_percent')}")
         print("test mode completed: no trades opened")
         return 0
     except Exception as exc:
         logger.error("startup/test validation failed: %s", exc, exc_info=True)
         try:
-            telegram.send(f"Darwin Engine startup failure: {exc}")
+            telegram.notify_error(f"startup failure: {exc}")
         except Exception:
             pass
         return 1
+    finally:
+        binance.close()
+        telegram.close()
 
 
-def run_live(logger: logging.Logger) -> int:
-    runtime, binance, telegram, _ = _create_runtime()
+async def run_live(logger: logging.Logger) -> int:
     try:
-        startup_validation(binance, telegram, leverage=5, symbols=DEFAULT_SYMBOLS, logger=logger)
+        runtime, binance, telegram, _ = _create_runtime(logger)
+    except CredentialsError as exc:
+        logger.error("credentials error: %s", exc)
+        return 1
+
+    stop_event = asyncio.Event()
+
+    def _request_shutdown(signum: int, _frame: Any) -> None:
+        logger.info("signal received: %s", signum)
+        runtime.stop()
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
+
+    try:
+        await asyncio.to_thread(startup_validation, binance, telegram, 5, DEFAULT_SYMBOLS, logger)
     except Exception as exc:
         logger.error("startup validation failed: %s", exc, exc_info=True)
         try:
-            telegram.send(f"Darwin Engine startup failure: {exc}")
+            telegram.notify_error(f"startup failure: {exc}")
         except Exception:
             pass
+        binance.close()
+        telegram.close()
         return 1
 
-    runtime.start()
-    logger.info("runtime started")
+    runtime_task = asyncio.create_task(runtime.run_forever())
+    wait_task = asyncio.create_task(stop_event.wait())
     try:
-        while True:
-            if not runtime.status().running:
-                return 1
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("keyboard interrupt received, stopping runtime")
+        done, _ = await asyncio.wait({runtime_task, wait_task}, return_when=asyncio.FIRST_COMPLETED)
+        if runtime_task in done:
+            return runtime_task.result()
         runtime.stop()
+        runtime_task.cancel()
+        try:
+            await runtime_task
+        except asyncio.CancelledError:
+            pass
         return 0
+    finally:
+        wait_task.cancel()
+        binance.close()
+        telegram.close()
 
 
 def main() -> None:
@@ -150,7 +161,7 @@ def main() -> None:
     args = parser.parse_args()
 
     logger = setup_logging()
-    code = run_test_mode(logger) if args.test else run_live(logger)
+    code = asyncio.run(run_test_mode(logger) if args.test else run_live(logger))
     raise SystemExit(code)
 
 

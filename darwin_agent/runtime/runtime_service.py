@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
-import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from darwin_agent.core.engine import DarwinCoreEngine, EquitySnapshot
 from darwin_agent.infrastructure.binance_client import BinanceFuturesClient
@@ -15,6 +15,15 @@ class RuntimeStatus:
     running: bool
     retries: int
     safe_shutdown: bool
+
+
+@dataclass(slots=True)
+class RuntimeState:
+    equity: float = 0.0
+    wallet_balance: float = 0.0
+    unrealized_pnl: float = 0.0
+    positions: list[dict[str, Any]] = field(default_factory=list)
+    drawdown_pct: float = 0.0
 
 
 class RuntimeService:
@@ -36,64 +45,78 @@ class RuntimeService:
         self._poll_interval_s = poll_interval_s
         self._max_retries = max_retries
         self._safe_shutdown_flag = safe_shutdown_flag
-        self._thread: threading.Thread | None = None
-        self._stop_event = threading.Event()
+        self._stop_event = asyncio.Event()
         self._running = False
         self._retry_count = 0
-
-    def start(self) -> None:
-        if self._running:
-            return
-        self._stop_event.clear()
-        self._running = True
-        self._thread = threading.Thread(target=self._run_loop, daemon=True, name="darwin-runtime")
-        self._thread.start()
-        self._notify("engine start")
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        self._running = False
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
-        self._notify("fatal stop")
-
-    def restart(self) -> None:
-        self.stop()
-        self.start()
+        self._state = RuntimeState()
 
     def status(self) -> RuntimeStatus:
         return RuntimeStatus(running=self._running, retries=self._retry_count, safe_shutdown=self._safe_shutdown_flag)
 
-    def _notify(self, message: str) -> None:
-        try:
-            self._telegram.send(f"Darwin Engine: {message}")
-        except Exception as exc:
-            self._logger.error("telegram notification failed: %s", exc)
+    def state(self) -> RuntimeState:
+        return self._state
 
-    def _run_once(self) -> None:
-        wallet_balance = self._binance.get_wallet_balance()
-        upnl = self._binance.get_unrealized_pnl()
-        positions = self._binance.get_open_positions()
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._running = False
+
+    async def run_forever(self) -> int:
+        self._stop_event.clear()
+        self._running = True
+        self._telegram.notify_engine_started()
+        self._logger.info("runtime loop started", extra={"event": "engine_started"})
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    await self._run_once()
+                    self._retry_count = 0
+                    await asyncio.sleep(self._poll_interval_s)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._retry_count += 1
+                    self._logger.error(
+                        "runtime tick exception",
+                        extra={"event": "runtime_tick_error", "retry": self._retry_count, "error": str(exc)},
+                        exc_info=True,
+                    )
+                    self._telegram.notify_error(str(exc))
+                    if self._retry_count > self._max_retries:
+                        self._logger.error(
+                            "max retries exceeded",
+                            extra={"event": "runtime_fatal_stop", "retry": self._retry_count},
+                        )
+                        return 1
+                    self._telegram.notify_reconnect_attempt(self._retry_count, self._max_retries)
+                    backoff = min(2 ** self._retry_count, 60)
+                    await asyncio.sleep(backoff)
+            return 0
+        finally:
+            self._running = False
+            self._telegram.notify_engine_stopped()
+
+    async def _run_once(self) -> None:
+        wallet_balance = await asyncio.to_thread(self._binance.get_wallet_balance)
+        upnl = await asyncio.to_thread(self._binance.get_unrealized_pnl)
+        positions = await asyncio.to_thread(self._binance.get_open_positions)
         snapshot = EquitySnapshot(wallet_balance=wallet_balance, unrealized_pnl=upnl)
         ctx = self._engine.evaluate(snapshot, positions)
 
-        if ctx.get("drawdown_alert"):
-            self._notify("drawdown > 10%")
+        self._state.wallet_balance = wallet_balance
+        self._state.unrealized_pnl = upnl
+        self._state.equity = snapshot.equity
+        self._state.positions = list(positions)
+        self._state.drawdown_pct = float(ctx.get("drawdown_pct", 0.0))
 
-    def _run_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                self._run_once()
-                self._retry_count = 0
-                time.sleep(self._poll_interval_s)
-            except Exception as exc:
-                self._logger.error("runtime exception: %s", exc, exc_info=True)
-                self._notify(f"runtime exception: {exc}")
-                self._retry_count += 1
-                if self._retry_count > self._max_retries:
-                    self._notify("fatal stop")
-                    self._running = False
-                    raise SystemExit(1)
-                backoff = min(2 ** self._retry_count, 60)
-                self._notify(f"restart attempt {self._retry_count}/{self._max_retries} in {backoff}s")
-                time.sleep(backoff)
+        if ctx.get("drawdown_alert"):
+            self._telegram.notify_error("drawdown > 10%")
+
+        self._logger.info(
+            "runtime tick",
+            extra={
+                "event": "runtime_tick",
+                "equity": self._state.equity,
+                "positions": len(self._state.positions),
+                "drawdown_pct": self._state.drawdown_pct,
+            },
+        )
