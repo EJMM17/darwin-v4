@@ -389,7 +389,7 @@ async def bot_start(body: BotStartRequest, request: Request,
         result = controller.start(mode=body.mode)
     else:
         runtime = _ensure_runtime()
-        started = runtime.start()
+        started = runtime.start(mode=body.mode)
         result = {
             "ok": started,
             "state": "running" if started else "already_running",
