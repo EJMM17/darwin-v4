@@ -41,12 +41,14 @@ from darwin_agent.capital.allocator import CapitalAllocator
 from darwin_agent.capital.phases import PhaseManager
 from darwin_agent.core.agent import AgentConfig, DarwinAgent
 from darwin_agent.exchanges.router import ExchangeRouter
-from darwin_agent.exchanges.bybit import BybitAdapter
+from darwin_agent.exchanges.binance import BinanceAdapter
 from darwin_agent.evolution.engine import EvolutionEngine
 from darwin_agent.evolution.diagnostics import EvolutionDiagnostics
 from darwin_agent.risk.portfolio_engine import PortfolioRiskEngine, RiskLimits
 from darwin_agent.orchestrator.agent_manager import AgentManager
 
+
+logger = logging.getLogger("darwin.main")
 
 BANNER = """
 ╔═══════════════════════════════════════════════════════════╗
@@ -83,22 +85,22 @@ def setup_logging(level: str, log_file: str | None = None):
 def build_exchange_router(config: DarwinConfig) -> ExchangeRouter:
     """Build ExchangeRouter from config."""
     adapters = {}
-    primary = None
+    primary = ExchangeID.BINANCE
 
     for ex_cfg in config.exchanges:
         if not ex_cfg.enabled:
             continue
         eid = ExchangeID(ex_cfg.exchange_id)
-        if eid == ExchangeID.BYBIT:
-            adapter = BybitAdapter(
-                api_key=ex_cfg.api_key,
-                api_secret=ex_cfg.api_secret,
-                testnet=ex_cfg.testnet,
-            )
-            adapters[eid] = adapter
-        # Add more exchanges here as adapters are built
-        if primary is None:
-            primary = eid
+        if eid != ExchangeID.BINANCE:
+            logger.warning("ignoring non-binance exchange config: %s", eid.value)
+            continue
+
+        adapter = BinanceAdapter(
+            api_key=ex_cfg.api_key,
+            api_secret=ex_cfg.api_secret,
+            testnet=False,
+        )
+        adapters[eid] = adapter
 
     if not adapters:
         raise RuntimeError("No exchange adapters enabled in config")
@@ -208,8 +210,6 @@ def build_agent_factory(
 
 async def run(config: DarwinConfig):
     """Main application loop."""
-    logger = logging.getLogger("darwin.main")
-
     print(BANNER)
     print(f"  Mode:     {config.mode.upper()}")
     print(f"  Capital:  ${config.starting_capital:.2f}")
@@ -240,17 +240,28 @@ async def run(config: DarwinConfig):
     # ── Connect exchanges ────────────────────────────────────
     logger.info("connecting exchanges...")
     try:
-        await router.connect_all()
-        statuses = await router.get_all_statuses()
+        await router.refresh_statuses()
+        statuses = router.get_exchange_statuses()
+        if not statuses:
+            raise RuntimeError("no exchange statuses available")
+
+        connected = {
+            eid: status
+            for eid, status in statuses.items()
+            if status.connected
+        }
         for eid, status in statuses.items():
             logger.info("  %s: %s", eid.value,
                         "CONNECTED" if status.connected else "FAILED")
+        if not connected:
+            raise RuntimeError("all exchange connections failed")
+
+        balance = await router.get_balance()
+        logger.info("exchange connected and balance verified: %.8f USDT", balance)
     except Exception as exc:
         logger.error("exchange connection failed: %s", exc)
-        if config.is_live:
-            logger.error("cannot proceed in live mode without exchanges")
-            sys.exit(1)
-        logger.warning("continuing in test mode without exchange connection")
+        logger.error("cannot proceed without active exchange connection")
+        sys.exit(1)
 
     # ── Build AgentManager ───────────────────────────────────
     manager = AgentManager(
@@ -347,7 +358,10 @@ async def run(config: DarwinConfig):
             logger.error("error stopping pool: %s", exc)
 
         try:
-            await router.disconnect_all()
+            for adapter in getattr(router, "_adapters", {}).values():
+                close_fn = getattr(adapter, "close", None)
+                if close_fn is not None:
+                    await close_fn()
             logger.info("exchanges disconnected")
         except Exception as exc:
             logger.error("error disconnecting exchanges: %s", exc)

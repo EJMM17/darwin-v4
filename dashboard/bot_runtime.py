@@ -10,12 +10,14 @@ import threading
 import time
 from typing import Optional
 
-from darwin_agent.config import DarwinConfig, load_config
+from darwin_agent.config import DarwinConfig, ExchangeConfig, load_config
 from darwin_agent.main import run as darwin_run
 from darwin_agent.monitoring.execution_audit import ExecutionAudit
 
 from dashboard.alerts import send_telegram_alert
 from dashboard.bot_controller import BotController, BotState
+from dashboard.database import Database
+from dashboard.crypto_vault import CryptoVault
 
 
 class DarwinRuntime:
@@ -39,6 +41,37 @@ class DarwinRuntime:
         self._starting_capital = max(self.config.starting_capital, 0.01)
         self._logger = logging.getLogger("darwin.runtime")
 
+    def _load_live_binance_credentials(self) -> ExchangeConfig:
+        db = Database(os.environ.get("DASHBOARD_DB_PATH", "data/dashboard.db"))
+        vault = CryptoVault()
+
+        creds = sorted(db.list_credentials(), key=lambda c: c.get("id", 0), reverse=True)
+        binance_live = next(
+            (c for c in creds if str(c.get("exchange", "")).lower() == "binance" and not bool(c.get("testnet", 1))),
+            None,
+        )
+        if binance_live is None:
+            raise RuntimeError("No live Binance credentials found in dashboard store")
+
+        record = db.get_credential(int(binance_live["id"]))
+        if not record:
+            raise RuntimeError("Failed to load Binance credential record")
+
+        return ExchangeConfig(
+            exchange_id="binance",
+            api_key=vault.decrypt(record["encrypted_api_key"]),
+            api_secret=vault.decrypt(record["encrypted_secret_key"]),
+            testnet=False,
+            enabled=True,
+            leverage=int(self.config.exchanges[0].leverage if self.config.exchanges else 20),
+            symbols=list(self.config.exchanges[0].symbols) if self.config.exchanges else ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+        )
+
+    def _enforce_live_binance(self) -> None:
+        live_exchange = self._load_live_binance_credentials()
+        self.config.mode = "live"
+        self.config.exchanges = [live_exchange]
+
     def is_running(self) -> bool:
         with self._lock:
             return self.running and self.thread is not None and self.thread.is_alive()
@@ -48,6 +81,7 @@ class DarwinRuntime:
             if self.is_running():
                 return False
 
+            self._enforce_live_binance()
             self.stop_event.clear()
             self.running = True
             self.thread = threading.Thread(target=self._thread_main, daemon=True, name="darwin-runtime")

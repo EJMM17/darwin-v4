@@ -36,6 +36,7 @@ def test_runtime_start_stop_and_no_thread_leak(monkeypatch):
             await br.asyncio.sleep(0.05)
 
     monkeypatch.setattr(br, "darwin_run", fake_run)
+    monkeypatch.setattr(br.DarwinRuntime, "_enforce_live_binance", lambda self: None)
 
     ctrl = BotController()
     audit = ExecutionAudit(log_dir="logs/audit-test")
@@ -62,6 +63,7 @@ def test_runtime_graceful_cancellation_and_audit_trigger(monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(br, "darwin_run", broken_run)
+    monkeypatch.setattr(br.DarwinRuntime, "_enforce_live_binance", lambda self: None)
 
     ctrl = BotController()
     audit = ExecutionAudit(log_dir="logs/audit-test-2")
@@ -93,3 +95,38 @@ def test_metrics_endpoint(monkeypatch, tmp_path):
         text = r.text
         assert "darwin_equity" in text
         assert "darwin_drawdown_pct" in text
+
+
+def test_runtime_enforces_live_binance_from_dashboard_credentials(monkeypatch, tmp_path):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("DASHBOARD_DB_PATH", str(tmp_path / "db.sqlite"))
+
+    from dashboard.database import Database
+    from dashboard.crypto_vault import CryptoVault
+    import dashboard.bot_runtime as br
+    from dashboard.bot_controller import BotController
+    from darwin_agent.monitoring.execution_audit import ExecutionAudit
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    vault = CryptoVault()
+    db.save_credential(
+        exchange="binance",
+        encrypted_api_key=vault.encrypt("live-key"),
+        encrypted_secret_key=vault.encrypt("live-secret"),
+        testnet=False,
+    )
+
+    ctrl = BotController()
+    audit = ExecutionAudit(log_dir="logs/audit-test-3")
+    runtime = br.DarwinRuntime(controller=ctrl, audit=audit)
+
+    runtime._enforce_live_binance()
+
+    assert runtime.config.mode == "live"
+    assert len(runtime.config.exchanges) == 1
+    assert runtime.config.exchanges[0].exchange_id == "binance"
+    assert runtime.config.exchanges[0].testnet is False
+    assert runtime.config.exchanges[0].api_key == "live-key"
+    assert runtime.config.exchanges[0].api_secret == "live-secret"
