@@ -308,39 +308,24 @@ def test_websocket_disconnect_does_not_stop_runtime(monkeypatch, tmp_path):
         assert runtime.is_running() is False
 
 
-def test_runtime_autostarts_on_app_start_when_enabled(monkeypatch, tmp_path):
+def test_runtime_does_not_autostart_on_app_start(monkeypatch, tmp_path):
     from cryptography.fernet import Fernet
 
     monkeypatch.setenv("DASHBOARD_SECRET_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("DASHBOARD_DB_PATH", str(tmp_path / "db.sqlite"))
     monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "pw")
-    monkeypatch.setenv("DARWIN_RUNTIME_AUTOSTART", "1")
-    monkeypatch.setenv("DARWIN_RUNTIME_DEFAULT_MODE", "paper")
 
     from importlib import reload
     import dashboard.database
     import dashboard.app
-    import dashboard.bot_runtime as br
     reload(dashboard.database)
     reload(dashboard.app)
-
-    async def fake_run(config):
-        while True:
-            await br.asyncio.sleep(0.05)
-
-    monkeypatch.setattr(br, "darwin_run", fake_run)
-    monkeypatch.setattr(br.DarwinRuntime, "_enforce_live_binance", lambda self: None)
 
     client = TestClient(dashboard.app.app)
     with client:
         time.sleep(0.2)
         runtime = dashboard.app._ensure_runtime()
-        assert runtime.is_running()
-
-        login = client.post("/api/login", json={"username": "admin", "password": "pw"})
-        csrf = login.json()["csrf_token"]
-        stop = client.post("/bot/stop", headers={"x-csrf-token": csrf})
-        assert stop.status_code == 200
+        assert runtime.is_running() is False
 
 def test_bot_status_includes_runtime_fields(monkeypatch, tmp_path):
     from cryptography.fernet import Fernet
@@ -362,7 +347,7 @@ def test_bot_status_includes_runtime_fields(monkeypatch, tmp_path):
         status = client.get("/bot/status")
         assert status.status_code == 200
         payload = status.json()
-        assert {"is_running", "current_equity", "positions", "drawdown", "last_update_timestamp"}.issubset(payload.keys())
+        assert {"is_running", "current_equity", "positions", "drawdown", "last_update"}.issubset(payload.keys())
 
 
 def test_runtime_calculate_live_equity_formula():

@@ -278,6 +278,9 @@ async def run(config: DarwinConfig):
                 testnet=bool(live_ex.testnet),
             )
             try:
+                for symbol in live_ex.symbols:
+                    await balance_adapter.set_leverage(symbol, 5)
+                    logger.info("live leverage override set: symbol=%s leverage=5", symbol)
                 wallet_balance, unrealized_pnl = await balance_adapter.get_wallet_balance_and_upnl()
                 runtime_capital = wallet_balance + unrealized_pnl
                 logger.info(
