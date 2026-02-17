@@ -18,6 +18,7 @@ from dashboard.alerts import send_telegram_alert
 from dashboard.bot_controller import BotController, BotState
 from dashboard.database import Database
 from dashboard.crypto_vault import CryptoVault
+from darwin_agent.exchanges.binance import BinanceAdapter
 
 
 class DarwinRuntime:
@@ -37,6 +38,7 @@ class DarwinRuntime:
         self._main_task: Optional[asyncio.Task] = None
         self._monitor_task: Optional[asyncio.Task] = None
         self._last_status_update = time.monotonic()
+        self._last_account_sync = 0.0
         self._last_seen_audit_alert = 0
         self._starting_capital = max(self.config.starting_capital, 0.01)
         self._logger = logging.getLogger("darwin.runtime")
@@ -76,12 +78,22 @@ class DarwinRuntime:
         with self._lock:
             return self.running and self.thread is not None and self.thread.is_alive()
 
-    def start(self) -> bool:
+    def start(self, mode: str = "live") -> bool:
         with self._lock:
             if self.is_running():
                 return False
 
-            self._enforce_live_binance()
+            requested_mode = (mode or "live").strip().lower()
+            if requested_mode == "live":
+                self._enforce_live_binance()
+                dashboard_mode = "live"
+            else:
+                # Runtime currently only supports Binance adapter execution.
+                # Keep mode marker aligned with dashboard UX for non-live starts.
+                self.config.mode = "test"
+                dashboard_mode = "paper"
+
+            self.controller.update_status(mode=dashboard_mode, state=BotState.STARTING)
             self.stop_event.clear()
             self.running = True
             self.thread = threading.Thread(target=self._thread_main, daemon=True, name="darwin-runtime")
@@ -183,7 +195,6 @@ class DarwinRuntime:
             if self.controller.status.state == BotState.ERROR:
                 return
             s = self.controller.status
-            metrics = self.audit.get_metrics()
 
             equity = float(s.equity)
             peak = float(s.peak_equity)
@@ -201,6 +212,12 @@ class DarwinRuntime:
                 exposure_by_symbol=dict(s.exposure_by_symbol),
                 state=BotState.RUNNING,
             )
+
+            # Periodically sync real account data for dashboard visibility.
+            if self.config.mode == "live" and (time.monotonic() - self._last_account_sync) >= 10.0:
+                self._last_account_sync = time.monotonic()
+                await self._sync_live_account_snapshot()
+
             self._last_status_update = time.monotonic()
 
             if drawdown_pct > 30.0:
@@ -232,6 +249,30 @@ class DarwinRuntime:
                     send_telegram_alert("Order rejected", details if isinstance(details, dict) else None)
 
             await asyncio.sleep(2.0)
+
+    async def _sync_live_account_snapshot(self) -> None:
+        ex_cfg = next((ex for ex in self.config.exchanges if ex.enabled), None)
+        if ex_cfg is None:
+            return
+
+        adapter = BinanceAdapter(
+            api_key=ex_cfg.api_key,
+            api_secret=ex_cfg.api_secret,
+            testnet=bool(ex_cfg.testnet),
+        )
+        try:
+            balance = await adapter.get_balance()
+            positions = await adapter.get_positions()
+            peak = max(float(self.controller.status.peak_equity), float(balance))
+            self.controller.update_status(
+                equity=float(balance),
+                peak_equity=peak,
+                exposure_by_symbol={p.symbol: p.size for p in positions},
+            )
+        except Exception as exc:
+            self._record_error("account_sync_failed", exc)
+        finally:
+            await adapter.close()
 
     def _record_error(self, alert_type: str, exc: Exception) -> None:
         details = {"error": str(exc)[:400]}
