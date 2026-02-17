@@ -8,6 +8,7 @@ import os
 import signal
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from darwin_agent.config import DarwinConfig, ExchangeConfig, load_config
@@ -40,6 +41,7 @@ class DarwinRuntime:
         self._last_status_update = time.monotonic()
         self._last_account_sync = 0.0
         self._last_seen_audit_alert = 0
+        self._runtime_started_monotonic = 0.0
         self._starting_capital = max(self.config.starting_capital, 0.01)
         self._logger = logging.getLogger("darwin.runtime")
 
@@ -96,6 +98,7 @@ class DarwinRuntime:
             self.controller.mark_started(mode=dashboard_mode)
             self.controller.update_status(state=BotState.STARTING)
             self.stop_event.clear()
+            self._runtime_started_monotonic = time.monotonic()
             self.running = True
             self.thread = threading.Thread(target=self._thread_main, daemon=True, name="darwin-runtime")
             self.thread.start()
@@ -128,6 +131,29 @@ class DarwinRuntime:
             self._main_task.cancel()
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
+
+    def emergency_close(self) -> bool:
+        with self._lock:
+            if not self.running:
+                self.controller.update_status(
+                    state=BotState.EMERGENCY_LOCKED,
+                    last_alert="EMERGENCY CLOSE triggered",
+                )
+                return False
+            self.stop_event.set()
+            self.controller.update_status(
+                state=BotState.EMERGENCY_LOCKED,
+                last_alert="EMERGENCY CLOSE triggered",
+                uptime_seconds=0.0,
+            )
+            loop = self.loop
+
+        if loop and loop.is_running():
+            loop.call_soon_threadsafe(self._request_stop)
+
+        self._logger.warning("Emergency close requested from dashboard")
+        send_telegram_alert("Emergency close triggered from dashboard")
+        return True
 
     def _thread_main(self) -> None:
         loop = asyncio.new_event_loop()
@@ -206,6 +232,11 @@ class DarwinRuntime:
             leverage = float(s.leverage)
             pnl_today = float(s.pnl_today)
             open_positions = len(s.exposure_by_symbol)
+            uptime_seconds = (
+                max(0.0, time.monotonic() - self._runtime_started_monotonic)
+                if self._runtime_started_monotonic
+                else float(s.uptime_seconds)
+            )
 
             self.controller.update_status(
                 equity=equity,
@@ -215,6 +246,19 @@ class DarwinRuntime:
                 pnl_today=pnl_today,
                 exposure_by_symbol=dict(s.exposure_by_symbol),
                 state=BotState.RUNNING,
+                mode="live" if self.config.mode == "live" else "paper",
+                started_at=s.started_at or datetime.now(timezone.utc).isoformat(),
+                uptime_seconds=uptime_seconds,
+            )
+            self._logger.debug(
+                "update_status heartbeat equity=%.4f peak=%.4f dd=%.4f lev=%.2f positions=%d mode=%s uptime=%.1f",
+                equity,
+                peak,
+                drawdown_pct,
+                leverage,
+                open_positions,
+                "live" if self.config.mode == "live" else "paper",
+                uptime_seconds,
             )
 
             # Periodically sync real account data for dashboard visibility.
@@ -265,16 +309,60 @@ class DarwinRuntime:
             testnet=bool(ex_cfg.testnet),
         )
         try:
-            balance = await adapter.get_balance()
             positions = await adapter.get_positions()
-            peak = max(float(self.controller.status.peak_equity), float(balance))
+            wallet_balance = float(await adapter.get_balance())
+            unrealized_pnl = 0.0
+            exposure_by_symbol = {}
+            leverage_values = []
+            for p in positions:
+                side_mult = -1.0 if str(getattr(p, "side", "")).endswith("SELL") else 1.0
+                size = float(getattr(p, "size", 0.0))
+                exposure_by_symbol[str(getattr(p, "symbol", ""))] = side_mult * size
+                unrealized_pnl += float(getattr(p, "unrealized_pnl", 0.0))
+                leverage_values.append(float(getattr(p, "leverage", 0.0)))
+
+            equity = wallet_balance + unrealized_pnl
+            if not (equity == equity):  # NaN guard
+                equity = wallet_balance
+            peak = max(float(self.controller.status.peak_equity), equity)
+            drawdown_pct = ((peak - equity) / peak * 100.0) if peak > 0 else 0.0
+            leverage = max(leverage_values) if leverage_values else float(ex_cfg.leverage)
+            uptime_seconds = (
+                max(0.0, time.monotonic() - self._runtime_started_monotonic)
+                if self._runtime_started_monotonic
+                else float(self.controller.status.uptime_seconds)
+            )
+
+            self._logger.debug(
+                "Live account sync wallet_balance=%.4f unrealized_pnl=%.4f equity=%.4f positions=%d",
+                wallet_balance,
+                unrealized_pnl,
+                equity,
+                len(exposure_by_symbol),
+            )
             self.controller.update_status(
-                equity=float(balance),
+                equity=equity,
                 peak_equity=peak,
-                exposure_by_symbol={p.symbol: p.size for p in positions},
+                drawdown_pct=drawdown_pct,
+                leverage=leverage,
+                pnl_today=unrealized_pnl,
+                exposure_by_symbol=exposure_by_symbol,
+                state=BotState.RUNNING,
+                mode="live",
+                started_at=self.controller.status.started_at or datetime.now(timezone.utc).isoformat(),
+                uptime_seconds=uptime_seconds,
+            )
+            self._logger.debug(
+                "Live update_status pushed equity=%.4f peak=%.4f dd=%.4f lev=%.2f uptime=%.1f",
+                equity,
+                peak,
+                drawdown_pct,
+                leverage,
+                uptime_seconds,
             )
         except Exception as exc:
             self._record_error("account_sync_failed", exc)
+            self.controller.update_status(last_alert=f"Live account sync failed: {str(exc)[:160]}")
         finally:
             await adapter.close()
 

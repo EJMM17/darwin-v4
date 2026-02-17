@@ -426,7 +426,10 @@ async def bot_stop(request: Request, sess: Dict = Depends(require_auth)):
 async def bot_emergency_close(request: Request,
                                 sess: Dict = Depends(require_auth)):
     _check_csrf(request, sess)
+    runtime = _ensure_runtime()
+    runtime_handled = runtime.emergency_close()
     result = controller.emergency_close()
+    result["runtime_handled"] = bool(runtime_handled)
 
     # Log to execution audit if available
     if audit_ref is not None:
@@ -434,6 +437,7 @@ async def bot_emergency_close(request: Request,
             audit_ref._fire_alert("DASHBOARD_EMERGENCY_CLOSE", {
                 "user": sess["username"],
                 "ip": _get_client_ip(request),
+                "runtime_handled": bool(runtime_handled),
             })
         except Exception:
             pass
