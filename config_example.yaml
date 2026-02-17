@@ -7,15 +7,18 @@
 # Environment variables override YAML values:
 #   DARWIN_CAPITAL=50     → capital.starting_capital
 #   DARWIN_MODE=test      → mode
-#   BYBIT_API_KEY=...     → exchanges[0].api_key
-#   BYBIT_API_SECRET=...  → exchanges[0].api_secret
+#   BINANCE_API_KEY=...   → exchanges[0].api_key
+#   BINANCE_API_SECRET=...→ exchanges[0].api_secret
+#   DARWIN_EXCHANGE=binance
+#   DARWIN_TESTNET=false
+#   DARWIN_FUTURES_TYPE=USDT-M
 #   REDIS_URL=...         → infra.redis_url
 #   DATABASE_URL=...      → infra.postgres_dsn
 #   LOG_LEVEL=DEBUG       → infra.log_level
 #   DASHBOARD_PORT=8080   → infra.dashboard_port
 # ═══════════════════════════════════════════════════════════
 
-mode: test  # "test" = testnet/paper, "live" = real money ⚠️
+mode: live  # set DARWIN_MODE=paper for explicit paper mode
 
 # ── Capital & Growth Phases ──────────────────────────────
 capital:
@@ -57,10 +60,11 @@ evolution:
 
 # ── Exchanges ────────────────────────────────────────────
 exchanges:
-  - exchange_id: bybit
-    api_key: ""                # Set via BYBIT_API_KEY env var
-    api_secret: ""             # Set via BYBIT_API_SECRET env var
-    testnet: true              # ⚠️ ALWAYS start with testnet!
+  - exchange_id: binance
+    api_key: ""                # Set via BINANCE_API_KEY env var
+    api_secret: ""             # Set via BINANCE_API_SECRET env var
+    testnet: false             # Live by default; set true only intentionally
+    futures_type: "USDT-M"
     enabled: true
     leverage: 20
     symbols:

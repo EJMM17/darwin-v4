@@ -104,6 +104,22 @@ class BinanceAdapter:
 
     # ── IExchangeAdapter ─────────────────────────────────────
 
+
+
+    def _extract_error(self, data: Dict) -> str:
+        if isinstance(data, dict) and data.get("code", 0) < 0:
+            code = data.get("code")
+            msg = data.get("msg", "unknown")
+            return f"Binance API error {code}: {msg}"
+        return ""
+
+    async def _signed_or_raise(self, method: str, path: str, params: Dict = None) -> Dict:
+        data = await self._signed(method, path, params)
+        err = self._extract_error(data if isinstance(data, dict) else {})
+        if err:
+            raise RuntimeError(err)
+        return data
+
     async def get_candles(self, symbol: str, timeframe: TimeFrame, limit: int = 100) -> List[Candle]:
         data = await self._public("/fapi/v1/klines", {
             "symbol": symbol,
@@ -217,13 +233,24 @@ class BinanceAdapter:
             return False
 
     async def get_balance(self) -> float:
-        data = await self._signed("GET", "/fapi/v2/balance")
+        data = await self._signed_or_raise("GET", "/fapi/v2/balance")
         if not isinstance(data, list):
-            return 0.0
+            raise RuntimeError("Unexpected Binance balance payload")
         for item in data:
             if item.get("asset") == "USDT":
                 return float(item.get("balance", 0))
         return 0.0
+
+    async def get_wallet_balance_and_upnl(self) -> tuple[float, float]:
+        data = await self._signed_or_raise("GET", "/fapi/v2/account")
+        if not isinstance(data, dict):
+            raise RuntimeError("Unexpected Binance account payload")
+        wallet = float(data.get("totalWalletBalance", 0.0))
+        upnl = float(data.get("totalUnrealizedProfit", 0.0))
+        return wallet, upnl
+
+    async def validate_live_credentials(self) -> None:
+        await self._signed_or_raise("GET", "/fapi/v2/account")
 
     async def get_status(self) -> ExchangeStatus:
         try:

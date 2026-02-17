@@ -359,3 +359,59 @@ class TestDashboardLogger:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_bot_start_live_with_valid_credentials_sets_equity(monkeypatch, tmp_path):
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("DASHBOARD_DB_PATH", str(tmp_path / "db.sqlite"))
+    monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "pw")
+
+    from importlib import reload
+    import dashboard.database
+    import dashboard.app
+    reload(dashboard.database)
+    reload(dashboard.app)
+
+    db = dashboard.app.db
+    vault = dashboard.app.CryptoVault()
+    db.save_credential(
+        exchange="binance",
+        encrypted_api_key=vault.encrypt("good-key"),
+        encrypted_secret_key=vault.encrypt("good-secret"),
+        testnet=False,
+    )
+
+    async def ok_validate(self):
+        return None
+
+    monkeypatch.setattr(dashboard.app.BinanceAdapter, "validate_live_credentials", ok_validate)
+
+    runtime = dashboard.app._ensure_runtime()
+
+    def fake_start(mode="live"):
+        dashboard.app.controller.update_status(
+            equity=125.0,
+            peak_equity=125.0,
+            drawdown_pct=0.0,
+            exposure_by_symbol={"BTCUSDT": 0.01},
+            leverage=5.0,
+            mode="LIVE",
+            uptime_seconds=1.0,
+        )
+        return True
+
+    monkeypatch.setattr(runtime, "start", fake_start)
+
+    client = TestClient(dashboard.app.app)
+    with client:
+        r = client.post("/api/login", json={"username": "admin", "password": "pw"})
+        csrf = r.json()["csrf_token"]
+        r = client.post("/bot/start", json={"mode": "live"}, headers={"x-csrf-token": csrf})
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+        status = client.get("/bot/status").json()
+        assert status["equity"] > 0
+        assert status["mode"] == "LIVE"
+        assert "BTCUSDT" in status["exposure_by_symbol"]
