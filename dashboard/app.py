@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from dashboard.crypto_vault import CryptoVault
 from dashboard.database import Database
 from dashboard.bot_controller import BotController, BotState
-from dashboard.bot_runtime import DarwinRuntime
+from dashboard.bot_runtime import RuntimeManager
 from dashboard.dash_logger import DashboardLogger
 from darwin_agent.monitoring.execution_audit import ExecutionAudit
 from darwin_agent.exchanges.binance import BinanceAdapter
@@ -55,10 +55,8 @@ controller = BotController()
 dash_log = DashboardLogger(log_dir="logs")
 sessions: Dict[str, Dict[str, Any]] = {}
 audit_ref = None  # set externally via set_execution_audit()
-runtime_ref: Optional[DarwinRuntime] = None
+runtime_ref: Optional[RuntimeManager] = None
 runtime_lock = threading.Lock()
-runtime_autostart_enabled = os.environ.get("DARWIN_RUNTIME_AUTOSTART", "0").strip().lower() in {"1", "true", "yes", "on"}
-runtime_default_mode = os.environ.get("DARWIN_RUNTIME_DEFAULT_MODE", "paper").strip().lower() or "paper"
 
 
 def _metric_gauge(name: str, help_text: str) -> Gauge:
@@ -86,13 +84,13 @@ def set_execution_audit(audit_instance) -> None:
     audit_ref = audit_instance
 
 
-def _ensure_runtime() -> DarwinRuntime:
+def _ensure_runtime() -> RuntimeManager:
     global runtime_ref, audit_ref
     with runtime_lock:
         if audit_ref is None:
             audit_ref = ExecutionAudit(log_dir="logs/audit")
         if runtime_ref is None:
-            runtime_ref = DarwinRuntime(controller=controller, audit=audit_ref)
+            runtime_ref = RuntimeManager(controller=controller, audit=audit_ref)
         return runtime_ref
 
 
@@ -135,9 +133,6 @@ async def lifespan(app: FastAPI):
     # Create default admin user if none exists
     if db.user_count() == 0:
         _create_default_admin()
-
-    if runtime_autostart_enabled:
-        runtime.start(mode=runtime_default_mode)
 
     yield
 
@@ -402,9 +397,11 @@ async def bot_status(request: Request, sess: Dict = Depends(require_auth)):
     runtime_status = runtime.get_runtime_status()
     s["is_running"] = runtime_status.get("is_running", False)
     s["current_equity"] = runtime_status.get("current_equity", s.get("equity", 0.0))
-    s["positions"] = runtime_status.get("positions", s.get("exposure_by_symbol", {}))
+    s["wallet_balance"] = runtime_status.get("wallet_balance", 0.0)
+    s["positions"] = runtime_status.get("positions", [])
     s["drawdown"] = runtime_status.get("drawdown", s.get("drawdown_pct", 0.0))
-    s["last_update_timestamp"] = runtime_status.get("last_update_timestamp", "")
+    s["last_update"] = runtime_status.get("last_update", "")
+    s["mode"] = runtime_status.get("mode", s.get("mode", "TEST"))
 
     _update_prometheus_metrics()
     return s
@@ -422,8 +419,6 @@ async def bot_start(body: BotStartRequest, request: Request,
                      sess: Dict = Depends(require_auth)):
     _check_csrf(request, sess)
     requested_mode = (body.mode or "paper").strip().lower()
-    if requested_mode == "live":
-        await _validate_live_binance_credentials_or_raise()
 
     runtime = _ensure_runtime()
     started = runtime.start(mode=requested_mode)
@@ -434,7 +429,7 @@ async def bot_start(body: BotStartRequest, request: Request,
         "runtime": runtime.get_runtime_status(),
     }
     if not started and runtime.last_start_error:
-        raise HTTPException(status_code=422, detail=runtime.last_start_error)
+        raise HTTPException(status_code=400, detail=runtime.last_start_error)
     dash_log.log(sess["username"], "BOT_START", _get_client_ip(request),
                  result["ok"], details=result)
     db.log_event(sess["username"], "BOT_START", _get_client_ip(request),
