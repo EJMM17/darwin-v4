@@ -210,7 +210,7 @@ class RuntimeManager:
             try:
                 await self._set_hard_leverage()
                 await self._update_live_snapshot()
-                await darwin_run(self.config)
+                await darwin_run(self.config, stop_event=self.stop_event)
                 if not self.stop_event.is_set():
                     self._logger.warning("runtime stopped unexpectedly; reconnect attempt")
             except asyncio.CancelledError:

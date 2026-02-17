@@ -22,9 +22,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import signal
 import sys
 import uuid
+import threading
 from datetime import datetime, timezone
 
 # Internal
@@ -219,7 +219,7 @@ def compute_position_size_from_equity(equity: float, risk_percent: float) -> flo
 # Main run loop
 # ═════════════════════════════════════════════════════════════
 
-async def run(config: DarwinConfig):
+async def run(config: DarwinConfig, stop_event: threading.Event | None = None):
     """Main application loop."""
     runtime_capital = float(config.starting_capital)
     print(BANNER)
@@ -311,21 +311,15 @@ async def run(config: DarwinConfig):
     logger.info("agent pool started: %d agents", config.evolution.pool_size)
 
     # ── Graceful shutdown ────────────────────────────────────
-    shutdown_event = asyncio.Event()
-
-    def handle_signal(sig, frame):
-        logger.info("received signal %s, shutting down...", sig)
-        shutdown_event.set()
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
+    def should_stop() -> bool:
+        return bool(stop_event and stop_event.is_set())
 
     # ── Tick loop ────────────────────────────────────────────
     tick_count = 0
     logger.info("entering tick loop (interval=%.1fs)", config.infra.tick_interval)
 
     try:
-        while not shutdown_event.is_set():
+        while not should_stop():
             tick_count += 1
 
             # Emit tick event
@@ -374,13 +368,11 @@ async def run(config: DarwinConfig):
                         )
 
             # Wait for next tick
-            try:
-                await asyncio.wait_for(
-                    shutdown_event.wait(),
-                    timeout=config.infra.tick_interval,
-                )
-            except asyncio.TimeoutError:
-                pass  # normal — just means tick interval elapsed
+            interval_remaining = float(config.infra.tick_interval)
+            while interval_remaining > 0 and not should_stop():
+                sleep_for = min(0.25, interval_remaining)
+                await asyncio.sleep(sleep_for)
+                interval_remaining -= sleep_for
 
     except Exception as exc:
         logger.error("fatal error in tick loop: %s", exc, exc_info=True)
