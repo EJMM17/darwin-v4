@@ -42,6 +42,9 @@ class BinanceFuturesClient:
         response.raise_for_status()
         return response.json()
 
+    def close(self) -> None:
+        self._session.close()
+
     def ping_futures(self) -> None:
         response = self._session.get(f"{self._base_url}/fapi/v1/time", timeout=self._timeout_s)
         response.raise_for_status()
@@ -71,6 +74,7 @@ class BinanceFuturesClient:
     def validate_startup(self, symbols: list[str], leverage: int) -> dict[str, Any]:
         self.ping_futures()
         wallet = self.get_wallet_balance()
+        _ = self.get_unrealized_pnl()
         positions = self.get_open_positions()
         leverage_result: dict[str, bool] = {}
         for symbol in symbols:
