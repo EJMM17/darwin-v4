@@ -9,7 +9,7 @@ import signal
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from darwin_agent.config import DarwinConfig, ExchangeConfig, load_config
 from darwin_agent.main import run as darwin_run
@@ -45,11 +45,42 @@ class DarwinRuntime:
         self._last_seen_audit_alert = 0
         self._runtime_started_monotonic = 0.0
         self._last_start_error = ""
+        self._last_update_timestamp = ""
         self._starting_capital = max(self.config.starting_capital, 0.01)
         self._logger = logging.getLogger("darwin.runtime")
         self._exchange_connected = False
         self._current_real_balance = 0.0
         self._active_positions = 0
+        self._risk_percent = float(self.config.risk.max_position_pct)
+
+    def _env_bool(self, name: str, default: bool) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _apply_runtime_env_overrides(self) -> None:
+        if os.getenv("DARWIN_EXCHANGE"):
+            exchange = os.getenv("DARWIN_EXCHANGE", "binance").strip().lower() or "binance"
+            for ex in self.config.exchanges:
+                ex.exchange_id = exchange
+        if os.getenv("DARWIN_TESTNET") is not None:
+            testnet = self._env_bool("DARWIN_TESTNET", False)
+            for ex in self.config.exchanges:
+                ex.testnet = testnet
+        if os.getenv("DARWIN_LEVERAGE") is not None:
+            try:
+                lev = max(1, min(MAX_LEVERAGE, int(os.getenv("DARWIN_LEVERAGE", str(MAX_LEVERAGE)))))
+                for ex in self.config.exchanges:
+                    ex.leverage = lev
+            except ValueError:
+                self._logger.warning("Invalid DARWIN_LEVERAGE value; using configured leverage")
+        if os.getenv("DARWIN_RISK_PERCENT") is not None:
+            try:
+                self.config.risk.max_position_pct = float(os.getenv("DARWIN_RISK_PERCENT", "2.0"))
+            except ValueError:
+                self._logger.warning("Invalid DARWIN_RISK_PERCENT value; using configured risk")
+        self._risk_percent = float(self.config.risk.max_position_pct)
 
     def _load_live_binance_credentials(self) -> ExchangeConfig:
         db = Database(os.environ.get("DASHBOARD_DB_PATH", "data/dashboard.db"))
@@ -91,6 +122,10 @@ class DarwinRuntime:
         finally:
             await adapter.close()
 
+    def calculate_live_equity(self, wallet_balance: float, unrealized_pnl: float) -> float:
+        equity = float(wallet_balance) + float(unrealized_pnl)
+        return equity if equity == equity else float(wallet_balance)
+
     async def _enforce_leverage_cap(self) -> None:
         ex_cfg = next((ex for ex in self.config.exchanges if ex.enabled), None)
         if ex_cfg is None:
@@ -117,11 +152,17 @@ class DarwinRuntime:
         status = self.controller.status
         return {
             "bot_alive": self.is_running(),
+            "is_running": self.is_running(),
             "exchange_connected": bool(self._exchange_connected),
             "current_real_balance": round(float(self._current_real_balance), 8),
+            "current_equity": round(float(status.equity), 8),
+            "positions": dict(status.exposure_by_symbol),
+            "drawdown": round(float(status.drawdown_pct), 4),
+            "last_update_timestamp": self._last_update_timestamp,
             "active_positions": int(self._active_positions),
             "controller_state": status.state.value,
             "mode": status.mode,
+            "risk_percent": self._risk_percent,
             "last_alert": status.last_alert,
         }
 
@@ -131,11 +172,13 @@ class DarwinRuntime:
                 return False
 
             requested_mode = (mode or "live").strip().lower()
+            self._apply_runtime_env_overrides()
             if requested_mode == "live":
                 try:
                     self._enforce_live_binance()
                     self._starting_capital = 0.01
                     self._last_start_error = ""
+                    self._last_update_timestamp = ""
                 except Exception as exc:
                     self._last_start_error = str(exc)
                     self.controller.update_status(state=BotState.ERROR, last_alert=self._last_start_error, mode="live")
@@ -277,9 +320,11 @@ class DarwinRuntime:
                         break
                 except asyncio.CancelledError:
                     raise
-                except Exception as exc:
+                except BaseException as exc:
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
                     self._exchange_connected = False
-                    self._record_error("runtime_exception", exc, fatal=False)
+                    self._record_error("runtime_exception", Exception(str(exc)), fatal=False)
                     if self.stop_event.is_set():
                         break
                     self._logger.warning("Engine reconnect scheduled in %.1fs", reconnect_delay)
@@ -341,6 +386,7 @@ class DarwinRuntime:
                 await self._sync_live_account_snapshot()
 
             self._last_status_update = time.monotonic()
+            self._last_update_timestamp = datetime.now(timezone.utc).isoformat()
 
             if drawdown_pct > 30.0:
                 send_telegram_alert("Drawdown above 30%", {"drawdown_pct": round(drawdown_pct, 2)})
@@ -395,13 +441,11 @@ class DarwinRuntime:
                 exposure_by_symbol[str(getattr(p, "symbol", ""))] = side_mult * size
                 leverage_values.append(float(getattr(p, "leverage", 0.0)))
 
-            equity = wallet_balance + unrealized_pnl
+            equity = self.calculate_live_equity(wallet_balance, unrealized_pnl)
             self._current_real_balance = equity
             if self.config.mode == "live" and self._starting_capital <= 0.01:
                 self._starting_capital = max(equity, 0.01)
             self._active_positions = len(exposure_by_symbol)
-            if not (equity == equity):  # NaN guard
-                equity = wallet_balance
             peak = max(float(self.controller.status.peak_equity), equity)
             drawdown_pct = ((peak - equity) / peak * 100.0) if peak > 0 else 0.0
             leverage = max(leverage_values) if leverage_values else float(ex_cfg.leverage)
@@ -410,8 +454,9 @@ class DarwinRuntime:
                 if self._runtime_started_monotonic
                 else float(self.controller.status.uptime_seconds)
             )
+            self._last_update_timestamp = datetime.now(timezone.utc).isoformat()
 
-            self._logger.debug(
+            self._logger.info(
                 "Live account sync wallet_balance=%.4f unrealized_pnl=%.4f equity=%.4f positions=%d",
                 wallet_balance,
                 unrealized_pnl,

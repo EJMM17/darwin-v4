@@ -188,7 +188,7 @@ def build_agent_factory(
         strategy.analyze = MagicMock(return_value=None)
 
         sizer = MagicMock()
-        sizer.calculate = MagicMock(return_value=0.01)
+        sizer.calculate = MagicMock(side_effect=lambda *a, **k: compute_position_size_from_equity(risk_engine.get_portfolio_state().total_equity, config.risk.max_position_pct))
 
         agent = DarwinAgent(
             agent_id=agent_id,
@@ -206,6 +206,14 @@ def build_agent_factory(
 
     return factory
 
+
+def compute_position_size_from_equity(equity: float, risk_percent: float) -> float:
+    """Compute notional position fraction from real-time equity and risk percentage."""
+    eq = max(float(equity), 0.0)
+    rp = max(float(risk_percent), 0.0)
+    if eq <= 0 or rp <= 0:
+        return 0.0
+    return min(1.0, rp / 100.0)
 
 # ═════════════════════════════════════════════════════════════
 # Main run loop
@@ -230,7 +238,7 @@ async def run(config: DarwinConfig):
     if errors:
         for e in errors:
             logger.error("CONFIG ERROR: %s", e)
-        sys.exit(1)
+        raise RuntimeError("Invalid configuration: " + "; ".join(errors))
 
     # ── Wire components ──────────────────────────────────────
     bus = EventBus()
@@ -287,7 +295,7 @@ async def run(config: DarwinConfig):
     except Exception as exc:
         logger.error("exchange connection failed: %s", exc)
         logger.error("cannot proceed without active exchange connection")
-        sys.exit(1)
+        raise RuntimeError(f"Exchange connection failed: {exc}")
 
     # ── Build AgentManager ───────────────────────────────────
     manager = AgentManager(
