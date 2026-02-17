@@ -57,6 +57,8 @@ sessions: Dict[str, Dict[str, Any]] = {}
 audit_ref = None  # set externally via set_execution_audit()
 runtime_ref: Optional[DarwinRuntime] = None
 runtime_lock = threading.Lock()
+runtime_autostart_enabled = os.environ.get("DARWIN_RUNTIME_AUTOSTART", "0").strip().lower() in {"1", "true", "yes", "on"}
+runtime_default_mode = os.environ.get("DARWIN_RUNTIME_DEFAULT_MODE", "paper").strip().lower() or "paper"
 
 
 def _metric_gauge(name: str, help_text: str) -> Gauge:
@@ -82,11 +84,6 @@ def set_execution_audit(audit_instance) -> None:
     """Call from main.py to wire in the ExecutionAudit instance."""
     global audit_ref
     audit_ref = audit_instance
-
-
-def set_bot_runner(runner_fn) -> None:
-    """Call from main.py to set the bot runner function."""
-    controller.set_runner(runner_fn)
 
 
 def _ensure_runtime() -> DarwinRuntime:
@@ -115,15 +112,7 @@ def _update_prometheus_metrics() -> None:
         except Exception:
             pass
 
-
-
-def _runtime_runner(stop_event, ctl):
-    runtime = _ensure_runtime()
-    runtime.start()
-
-
 set_execution_audit(ExecutionAudit(log_dir="logs/audit"))
-set_bot_runner(_runtime_runner)
 
 
 
@@ -136,7 +125,7 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global vault
-    _ensure_runtime()
+    runtime = _ensure_runtime()
     try:
         vault = CryptoVault()
     except RuntimeError:
@@ -146,6 +135,9 @@ async def lifespan(app: FastAPI):
     # Create default admin user if none exists
     if db.user_count() == 0:
         _create_default_admin()
+
+    if runtime_autostart_enabled:
+        runtime.start(mode=runtime_default_mode)
 
     yield
 
@@ -421,23 +413,19 @@ async def bot_runtime_status(request: Request, sess: Dict = Depends(require_auth
 async def bot_start(body: BotStartRequest, request: Request,
                      sess: Dict = Depends(require_auth)):
     _check_csrf(request, sess)
-    runner_fn = getattr(controller, "_runner_fn", None)
     requested_mode = (body.mode or "paper").strip().lower()
     if requested_mode == "live":
         await _validate_live_binance_credentials_or_raise()
 
-    if runner_fn is not None and getattr(runner_fn, "__name__", "") != "_runtime_runner":
-        result = controller.start(mode=requested_mode)
-    else:
-        runtime = _ensure_runtime()
-        started = runtime.start(mode=requested_mode)
-        result = {
-            "ok": started,
-            "state": "running" if started else "already_running",
-            "mode": requested_mode,
-        }
-        if not started and runtime.last_start_error:
-            raise HTTPException(status_code=422, detail=runtime.last_start_error)
+    runtime = _ensure_runtime()
+    started = runtime.start(mode=requested_mode)
+    result = {
+        "ok": started,
+        "state": "running" if started else "already_running",
+        "mode": requested_mode,
+    }
+    if not started and runtime.last_start_error:
+        raise HTTPException(status_code=422, detail=runtime.last_start_error)
     dash_log.log(sess["username"], "BOT_START", _get_client_ip(request),
                  result["ok"], details=result)
     db.log_event(sess["username"], "BOT_START", _get_client_ip(request),
@@ -448,16 +436,12 @@ async def bot_start(body: BotStartRequest, request: Request,
 @app.post("/bot/stop")
 async def bot_stop(request: Request, sess: Dict = Depends(require_auth)):
     _check_csrf(request, sess)
-    runner_fn = getattr(controller, "_runner_fn", None)
-    if runner_fn is not None and getattr(runner_fn, "__name__", "") != "_runtime_runner":
-        result = controller.stop()
-    else:
-        runtime = _ensure_runtime()
-        stopped = runtime.stop()
-        result = {
-            "ok": True,
-            "state": "stopped" if stopped else "not_running",
-        }
+    runtime = _ensure_runtime()
+    stopped = runtime.stop()
+    result = {
+        "ok": True,
+        "state": "stopped" if stopped else "not_running",
+    }
     dash_log.log(sess["username"], "BOT_STOP", _get_client_ip(request),
                  result["ok"], details=result)
     db.log_event(sess["username"], "BOT_STOP", _get_client_ip(request),
