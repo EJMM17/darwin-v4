@@ -410,6 +410,13 @@ async def bot_status(request: Request, sess: Dict = Depends(require_auth)):
     return s
 
 
+
+
+@app.get("/bot/runtime-status")
+async def bot_runtime_status(request: Request, sess: Dict = Depends(require_auth)):
+    runtime = _ensure_runtime()
+    return runtime.get_runtime_status()
+
 @app.post("/bot/start")
 async def bot_start(body: BotStartRequest, request: Request,
                      sess: Dict = Depends(require_auth)):

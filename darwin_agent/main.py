@@ -213,9 +213,10 @@ def build_agent_factory(
 
 async def run(config: DarwinConfig):
     """Main application loop."""
+    runtime_capital = float(config.starting_capital)
     print(BANNER)
     print(f"  Mode:     {config.mode.upper()}")
-    print(f"  Capital:  ${config.starting_capital:.2f}")
+    print(f"  Capital:  ${runtime_capital:.2f}")
     print(f"  Pool:     {config.evolution.pool_size} agents")
     print(f"  Tick:     {config.infra.tick_interval}s")
     exchanges = [e.exchange_id for e in config.exchanges if e.enabled]
@@ -259,8 +260,30 @@ async def run(config: DarwinConfig):
         if not connected:
             raise RuntimeError("all exchange connections failed")
 
-        balance = await router.get_balance()
-        logger.info("exchange connected and balance verified: %.8f USDT", balance)
+        if config.is_live:
+            live_ex = next((ex for ex in config.exchanges if ex.enabled), None)
+            if live_ex is None:
+                raise RuntimeError("no enabled exchange for live balance sync")
+            balance_adapter = BinanceAdapter(
+                api_key=live_ex.api_key,
+                api_secret=live_ex.api_secret,
+                testnet=bool(live_ex.testnet),
+            )
+            try:
+                wallet_balance, unrealized_pnl = await balance_adapter.get_wallet_balance_and_upnl()
+                runtime_capital = wallet_balance + unrealized_pnl
+                logger.info(
+                    "live equity synced from Binance: wallet=%.8f upnl=%.8f equity=%.8f",
+                    wallet_balance,
+                    unrealized_pnl,
+                    runtime_capital,
+                )
+            finally:
+                await balance_adapter.close()
+        else:
+            runtime_capital = await router.get_balance()
+            logger.info("exchange connected and balance verified: %.8f USDT", runtime_capital)
+        risk_engine.update_equity(runtime_capital)
     except Exception as exc:
         logger.error("exchange connection failed: %s", exc)
         logger.error("cannot proceed without active exchange connection")
@@ -271,7 +294,7 @@ async def run(config: DarwinConfig):
         agent_factory=agent_factory,
         allocator=allocator,
         bus=bus,
-        total_capital=config.starting_capital,
+        total_capital=runtime_capital,
     )
     await manager.start()
     logger.info("agent pool started: %d agents", config.evolution.pool_size)

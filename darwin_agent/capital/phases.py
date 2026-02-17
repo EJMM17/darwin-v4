@@ -17,25 +17,25 @@ _DEFAULT_RULES = {
         "max_capital": 100.0,
         "risk_pct": 2.0,
         "max_positions": 2,
-        "leverage": 10,
+        "leverage": 5,
     },
     GrowthPhase.SCALING: {
         "max_capital": 500.0,
         "risk_pct": 3.0,
         "max_positions": 3,
-        "leverage": 15,
+        "leverage": 5,
     },
     GrowthPhase.ACCELERATION: {
         "max_capital": 2_000.0,
         "risk_pct": 4.0,
         "max_positions": 4,
-        "leverage": 20,
+        "leverage": 5,
     },
     GrowthPhase.CONSOLIDATION: {
         "max_capital": float("inf"),
         "risk_pct": 2.5,
         "max_positions": 3,
-        "leverage": 10,
+        "leverage": 5,
     },
 }
 

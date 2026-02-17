@@ -62,6 +62,8 @@ from darwin_agent.evolution.fitness import RiskAwareFitness, compute_fitness
 
 logger = logging.getLogger("darwin.agent")
 
+MAX_LEVERAGE = 5
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -283,8 +285,9 @@ class DarwinAgent:
     # ── Trade execution ──────────────────────────────────────
 
     async def _open_trade(self, symbol, sig, qty, price, params):
+        effective_leverage = min(int(params.leverage), MAX_LEVERAGE)
         try:
-            await self._exchange.set_leverage(symbol, params.leverage)
+            await self._exchange.set_leverage(symbol, effective_leverage)
         except Exception:
             pass
         sl = price * (1 - sig.stop_loss_pct / 100) if sig.side == OrderSide.BUY else \
@@ -295,7 +298,7 @@ class DarwinAgent:
         result = await self._exchange.place_order(OrderRequest(
             symbol=symbol, side=sig.side, order_type=OrderType.MARKET,
             quantity=qty, stop_loss=round(sl, 2), take_profit=round(tp, 2),
-            leverage=params.leverage, agent_id=self.agent_id,
+            leverage=effective_leverage, agent_id=self.agent_id,
             metadata={"strategy": sig.strategy.value},
         ))
         if not result.success:
@@ -305,14 +308,14 @@ class DarwinAgent:
         self._positions[symbol] = Position(
             symbol=symbol, side=sig.side, size=result.filled_qty,
             entry_price=result.filled_price, current_price=result.filled_price,
-            leverage=params.leverage, stop_loss=round(sl, 2),
+            leverage=effective_leverage, stop_loss=round(sl, 2),
             take_profit=round(tp, 2), agent_id=self.agent_id,
         )
         self._gen_trades += 1
 
         await self._bus.emit(trade_opened_event(
             self.agent_id, symbol, sig.side.value, result.filled_qty,
-            result.filled_price, params.leverage, sig.strategy.value,
+            result.filled_price, effective_leverage, sig.strategy.value,
         ))
 
     # ── Position management ──────────────────────────────────

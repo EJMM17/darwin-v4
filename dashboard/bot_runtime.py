@@ -21,6 +21,8 @@ from dashboard.database import Database
 from dashboard.crypto_vault import CryptoVault
 from darwin_agent.exchanges.binance import BinanceAdapter
 
+MAX_LEVERAGE = 5
+
 
 class DarwinRuntime:
     """Runs Darwin async engine in a dedicated event loop thread."""
@@ -45,6 +47,9 @@ class DarwinRuntime:
         self._last_start_error = ""
         self._starting_capital = max(self.config.starting_capital, 0.01)
         self._logger = logging.getLogger("darwin.runtime")
+        self._exchange_connected = False
+        self._current_real_balance = 0.0
+        self._active_positions = 0
 
     def _load_live_binance_credentials(self) -> ExchangeConfig:
         db = Database(os.environ.get("DASHBOARD_DB_PATH", "data/dashboard.db"))
@@ -68,7 +73,7 @@ class DarwinRuntime:
             api_secret=vault.decrypt(record["encrypted_secret_key"]),
             testnet=False,
             enabled=True,
-            leverage=int(self.config.exchanges[0].leverage if self.config.exchanges else 20),
+            leverage=MAX_LEVERAGE,
             symbols=list(self.config.exchanges[0].symbols) if self.config.exchanges else ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
         )
 
@@ -86,6 +91,20 @@ class DarwinRuntime:
         finally:
             await adapter.close()
 
+    async def _enforce_leverage_cap(self) -> None:
+        ex_cfg = next((ex for ex in self.config.exchanges if ex.enabled), None)
+        if ex_cfg is None:
+            return
+        adapter = BinanceAdapter(api_key=ex_cfg.api_key, api_secret=ex_cfg.api_secret, testnet=False)
+        try:
+            for symbol in ex_cfg.symbols:
+                ok = await adapter.set_leverage(symbol, MAX_LEVERAGE)
+                if not ok:
+                    raise RuntimeError(f"Failed to set leverage={MAX_LEVERAGE} on {symbol}")
+            self._logger.info("Leverage cap enforced: %sx on %d symbols", MAX_LEVERAGE, len(ex_cfg.symbols))
+        finally:
+            await adapter.close()
+
     @property
     def last_start_error(self) -> str:
         return self._last_start_error
@@ -93,6 +112,18 @@ class DarwinRuntime:
     def is_running(self) -> bool:
         with self._lock:
             return self.running and self.thread is not None and self.thread.is_alive()
+
+    def get_runtime_status(self) -> dict:
+        status = self.controller.status
+        return {
+            "bot_alive": self.is_running(),
+            "exchange_connected": bool(self._exchange_connected),
+            "current_real_balance": round(float(self._current_real_balance), 8),
+            "active_positions": int(self._active_positions),
+            "controller_state": status.state.value,
+            "mode": status.mode,
+            "last_alert": status.last_alert,
+        }
 
     def start(self, mode: str = "live") -> bool:
         with self._lock:
@@ -103,6 +134,7 @@ class DarwinRuntime:
             if requested_mode == "live":
                 try:
                     self._enforce_live_binance()
+                    self._starting_capital = 0.01
                     self._last_start_error = ""
                 except Exception as exc:
                     self._last_start_error = str(exc)
@@ -231,12 +263,29 @@ class DarwinRuntime:
                 return None
 
         signal.signal = _safe_signal
+        reconnect_delay = 3.0
         try:
-            await darwin_run(self.config)
+            while not self.stop_event.is_set():
+                try:
+                    await self._enforce_leverage_cap()
+                    await darwin_run(self.config)
+                    if not self.stop_event.is_set():
+                        self._logger.warning("Darwin engine exited unexpectedly, restarting in %.1fs", reconnect_delay)
+                        await asyncio.sleep(reconnect_delay)
+                        reconnect_delay = min(30.0, reconnect_delay * 2)
+                    else:
+                        break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._exchange_connected = False
+                    self._record_error("runtime_exception", exc, fatal=False)
+                    if self.stop_event.is_set():
+                        break
+                    self._logger.warning("Engine reconnect scheduled in %.1fs", reconnect_delay)
+                    await asyncio.sleep(reconnect_delay)
+                    reconnect_delay = min(30.0, reconnect_delay * 2)
         except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._record_error("runtime_exception", exc)
             raise
         finally:
             signal.signal = original_signal
@@ -244,8 +293,6 @@ class DarwinRuntime:
     async def _status_monitor(self) -> None:
         initial_live_sync_done = False
         while not self.stop_event.is_set():
-            if self.controller.status.state == BotState.ERROR:
-                return
             s = self.controller.status
 
             if self.config.mode == "live" and not initial_live_sync_done:
@@ -298,13 +345,13 @@ class DarwinRuntime:
             if drawdown_pct > 30.0:
                 send_telegram_alert("Drawdown above 30%", {"drawdown_pct": round(drawdown_pct, 2)})
 
-            if equity > 0 and equity < self._starting_capital * 0.5:
+            if self.config.mode != "live" and equity > 0 and equity < self._starting_capital * 0.5:
                 send_telegram_alert("Equity floor guard triggered", {"equity": round(equity, 2)})
                 self.stop_event.set()
                 self._request_stop()
                 return
 
-            max_lev = max((float(ex.leverage) for ex in self.config.exchanges if ex.enabled), default=0.0)
+            max_lev = MAX_LEVERAGE
             if leverage > max_lev > 0:
                 send_telegram_alert("Leverage guard exceeded", {"leverage": leverage, "max": max_lev})
 
@@ -338,6 +385,7 @@ class DarwinRuntime:
         try:
             positions = await adapter.get_positions()
             wallet_balance, unrealized_pnl = await adapter.get_wallet_balance_and_upnl()
+            self._exchange_connected = True
             self._logger.debug("Binance balance fetch succeeded wallet=%.4f upnl=%.4f", wallet_balance, unrealized_pnl)
             exposure_by_symbol = {}
             leverage_values = []
@@ -348,6 +396,10 @@ class DarwinRuntime:
                 leverage_values.append(float(getattr(p, "leverage", 0.0)))
 
             equity = wallet_balance + unrealized_pnl
+            self._current_real_balance = equity
+            if self.config.mode == "live" and self._starting_capital <= 0.01:
+                self._starting_capital = max(equity, 0.01)
+            self._active_positions = len(exposure_by_symbol)
             if not (equity == equity):  # NaN guard
                 equity = wallet_balance
             peak = max(float(self.controller.status.peak_equity), equity)
@@ -387,13 +439,14 @@ class DarwinRuntime:
                 uptime_seconds,
             )
         except Exception as exc:
+            self._exchange_connected = False
             self._logger.debug("Binance balance fetch failed: %s", exc)
-            self._record_error("account_sync_failed", exc)
+            self._record_error("account_sync_failed", exc, fatal=False)
             self.controller.update_status(last_alert=f"Live account sync failed: {str(exc)[:160]}")
         finally:
             await adapter.close()
 
-    def _record_error(self, alert_type: str, exc: Exception) -> None:
+    def _record_error(self, alert_type: str, exc: Exception, fatal: bool = True) -> None:
         details = {"error": str(exc)[:400]}
         try:
             self.audit._fire_alert(alert_type, details)
@@ -401,4 +454,7 @@ class DarwinRuntime:
             pass
         self._logger.exception("Darwin runtime failure: %s", exc)
         send_telegram_alert("Exception in trading loop", details)
-        self.controller.update_status(state=BotState.ERROR, last_alert=str(exc)[:200])
+        if fatal:
+            self.controller.update_status(state=BotState.ERROR, last_alert=str(exc)[:200])
+        else:
+            self.controller.update_status(last_alert=str(exc)[:200])

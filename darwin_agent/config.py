@@ -31,7 +31,7 @@ class ExchangeConfig:
     testnet: bool = False
     futures_type: str = "USDT-M"
     enabled: bool = True
-    leverage: int = 20
+    leverage: int = 5
     symbols: List[str] = field(default_factory=lambda: [
         "BTCUSDT", "ETHUSDT", "SOLUSDT",
     ])
@@ -211,7 +211,7 @@ def load_config(path: str | None = None) -> DarwinConfig:
                 testnet=_env_bool("DARWIN_TESTNET", bool(ex.get("testnet", False))),
                 futures_type=os.getenv("DARWIN_FUTURES_TYPE", ex.get("futures_type", "USDT-M")),
                 enabled=ex.get("enabled", True),
-                leverage=int(ex.get("leverage", 20)),
+                leverage=min(5, int(ex.get("leverage", 5))),
                 symbols=ex.get("symbols", ["BTCUSDT", "ETHUSDT", "SOLUSDT"]),
             )
             config.exchanges.append(exc)
