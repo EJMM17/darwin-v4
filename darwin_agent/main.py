@@ -122,13 +122,26 @@ def build_risk_engine(config: DarwinConfig) -> PortfolioRiskEngine:
 
 def build_allocator(config: DarwinConfig) -> CapitalAllocator:
     """Build CapitalAllocator from config."""
+    phase_overrides = {
+        GrowthPhase.BOOTSTRAP: {
+            "max_capital": config.capital.bootstrap_target,
+            "risk_pct": config.capital.bootstrap_risk_pct,
+        },
+        GrowthPhase.SCALING: {
+            "max_capital": config.capital.scaling_target,
+            "risk_pct": config.capital.scaling_risk_pct,
+        },
+        GrowthPhase.ACCELERATION: {
+            "max_capital": config.capital.acceleration_target,
+            "risk_pct": config.capital.acceleration_risk_pct,
+        },
+        GrowthPhase.CONSOLIDATION: {
+            "risk_pct": config.capital.consolidation_risk_pct,
+        },
+    }
+
     return CapitalAllocator(
-        starting_capital=config.starting_capital,
-        phase_manager=PhaseManager(
-            bootstrap_target=config.capital.bootstrap_target,
-            scaling_target=config.capital.scaling_target,
-            acceleration_target=config.capital.acceleration_target,
-        ),
+        phase_manager=PhaseManager(overrides=phase_overrides),
     )
 
 
