@@ -157,3 +157,109 @@ def test_runtime_sets_started_at_and_uptime(monkeypatch):
     assert status.uptime_seconds > 0
 
     assert runtime.stop() is True
+
+
+def test_live_sync_sets_positive_equity_and_calls_update_status(monkeypatch, tmp_path):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("DASHBOARD_DB_PATH", str(tmp_path / "db.sqlite"))
+
+    import dashboard.bot_runtime as br
+    from dashboard.database import Database
+    from dashboard.crypto_vault import CryptoVault
+    from dashboard.bot_controller import BotController
+    from darwin_agent.monitoring.execution_audit import ExecutionAudit
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    vault = CryptoVault()
+    db.save_credential(
+        exchange="binance",
+        encrypted_api_key=vault.encrypt("live-key"),
+        encrypted_secret_key=vault.encrypt("live-secret"),
+        testnet=False,
+    )
+
+    class FakeAdapter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def get_positions(self):
+            from darwin_agent.interfaces.types import Position
+            from darwin_agent.interfaces.enums import OrderSide, ExchangeID
+            return [
+                Position(
+                    symbol="BTCUSDT",
+                    side=OrderSide.BUY,
+                    size=0.01,
+                    entry_price=50000,
+                    current_price=51000,
+                    unrealized_pnl=5.0,
+                    leverage=10,
+                    exchange_id=ExchangeID.BINANCE,
+                )
+            ]
+
+        async def get_wallet_balance_and_upnl(self):
+            return 100.0, 5.0
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(br, "BinanceAdapter", FakeAdapter)
+
+    ctrl = BotController()
+    audit = ExecutionAudit(log_dir="logs/audit-test-live-sync")
+    runtime = br.DarwinRuntime(controller=ctrl, audit=audit)
+    runtime._enforce_live_binance()
+
+    calls = []
+    orig_update = ctrl.update_status
+
+    def spy_update_status(**kwargs):
+        calls.append(kwargs)
+        orig_update(**kwargs)
+
+    monkeypatch.setattr(ctrl, "update_status", spy_update_status)
+
+    import asyncio
+    asyncio.run(runtime._sync_live_account_snapshot())
+
+    assert ctrl.status.equity > 0
+    assert any({"equity", "peak_equity", "drawdown_pct", "exposure_by_symbol", "leverage", "mode", "uptime_seconds"}.issubset(set(c.keys())) for c in calls)
+
+
+def test_live_start_rejects_invalid_binance_credentials(monkeypatch, tmp_path):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("DASHBOARD_DB_PATH", str(tmp_path / "db.sqlite"))
+    monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "pw")
+
+    from importlib import reload
+    import dashboard.database
+    import dashboard.app
+    reload(dashboard.database)
+    reload(dashboard.app)
+
+    db = dashboard.app.db
+    vault = dashboard.app.CryptoVault()
+    db.save_credential(
+        exchange="binance",
+        encrypted_api_key=vault.encrypt("bad-key"),
+        encrypted_secret_key=vault.encrypt("bad-secret"),
+        testnet=False,
+    )
+
+    async def bad_validate(self):
+        raise RuntimeError("Invalid API-key, IP, or permissions for action")
+
+    monkeypatch.setattr(dashboard.app.BinanceAdapter, "validate_live_credentials", bad_validate)
+
+    client = TestClient(dashboard.app.app)
+    with client:
+        r = client.post("/api/login", json={"username": "admin", "password": "pw"})
+        csrf = r.json()["csrf_token"]
+        r = client.post("/bot/start", json={"mode": "live"}, headers={"x-csrf-token": csrf})
+        assert r.status_code in (400, 422)
+        assert "failed" in r.json()["detail"].lower() or "invalid" in r.json()["detail"].lower()

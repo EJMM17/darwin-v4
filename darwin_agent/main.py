@@ -95,10 +95,13 @@ def build_exchange_router(config: DarwinConfig) -> ExchangeRouter:
             logger.warning("ignoring non-binance exchange config: %s", eid.value)
             continue
 
+        if not ex_cfg.api_key or not ex_cfg.api_secret:
+            raise RuntimeError("Binance live credentials missing: configure API key and secret in dashboard")
+
         adapter = BinanceAdapter(
             api_key=ex_cfg.api_key,
             api_secret=ex_cfg.api_secret,
-            testnet=False,
+            testnet=bool(ex_cfg.testnet),
         )
         adapters[eid] = adapter
 

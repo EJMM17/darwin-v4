@@ -25,10 +25,11 @@ logger = logging.getLogger("darwin.config")
 
 @dataclass
 class ExchangeConfig:
-    exchange_id: str = "bybit"
+    exchange_id: str = "binance"
     api_key: str = ""
     api_secret: str = ""
-    testnet: bool = True
+    testnet: bool = False
+    futures_type: str = "USDT-M"
     enabled: bool = True
     leverage: int = 20
     symbols: List[str] = field(default_factory=lambda: [
@@ -100,9 +101,9 @@ class DarwinConfig:
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
     infra: InfraConfig = field(default_factory=InfraConfig)
     exchanges: List[ExchangeConfig] = field(default_factory=lambda: [
-        ExchangeConfig(exchange_id="bybit"),
+        ExchangeConfig(exchange_id="binance"),
     ])
-    mode: str = "test"  # "test" or "live"
+    mode: str = "live"  # "paper" or "live"
 
     @property
     def starting_capital(self) -> float:
@@ -155,6 +156,12 @@ def load_config(path: str | None = None) -> DarwinConfig:
 
     config = DarwinConfig()
 
+    def _env_bool(name: str, default: bool) -> bool:
+        raw_val = os.getenv(name)
+        if raw_val is None:
+            return default
+        return raw_val.strip().lower() in {"1", "true", "yes", "on"}
+
     # Capital
     cap = raw.get("capital", raw)  # support flat or nested
     config.capital.starting_capital = float(
@@ -194,13 +201,15 @@ def load_config(path: str | None = None) -> DarwinConfig:
     if exchanges_raw:
         config.exchanges = []
         for ex in exchanges_raw:
+            exchange_id = os.getenv("DARWIN_EXCHANGE", ex.get("exchange_id", "binance"))
             exc = ExchangeConfig(
-                exchange_id=ex.get("exchange_id", "bybit"),
-                api_key=os.getenv(f"{ex.get('exchange_id', 'bybit').upper()}_API_KEY",
+                exchange_id=exchange_id,
+                api_key=os.getenv(f"{exchange_id.upper()}_API_KEY",
                                   ex.get("api_key", "")),
-                api_secret=os.getenv(f"{ex.get('exchange_id', 'bybit').upper()}_API_SECRET",
+                api_secret=os.getenv(f"{exchange_id.upper()}_API_SECRET",
                                      ex.get("api_secret", "")),
-                testnet=ex.get("testnet", True),
+                testnet=_env_bool("DARWIN_TESTNET", bool(ex.get("testnet", False))),
+                futures_type=os.getenv("DARWIN_FUTURES_TYPE", ex.get("futures_type", "USDT-M")),
                 enabled=ex.get("enabled", True),
                 leverage=int(ex.get("leverage", 20)),
                 symbols=ex.get("symbols", ["BTCUSDT", "ETHUSDT", "SOLUSDT"]),
@@ -208,9 +217,13 @@ def load_config(path: str | None = None) -> DarwinConfig:
             config.exchanges.append(exc)
     else:
         # Default: check env vars
-        config.exchanges[0].api_key = os.getenv("BYBIT_API_KEY", "")
-        config.exchanges[0].api_secret = os.getenv("BYBIT_API_SECRET", "")
+        default_exchange = os.getenv("DARWIN_EXCHANGE", config.exchanges[0].exchange_id)
+        config.exchanges[0].exchange_id = default_exchange
+        config.exchanges[0].testnet = _env_bool("DARWIN_TESTNET", config.exchanges[0].testnet)
+        config.exchanges[0].futures_type = os.getenv("DARWIN_FUTURES_TYPE", config.exchanges[0].futures_type)
+        config.exchanges[0].api_key = os.getenv(f"{default_exchange.upper()}_API_KEY", "")
+        config.exchanges[0].api_secret = os.getenv(f"{default_exchange.upper()}_API_SECRET", "")
 
-    config.mode = os.getenv("DARWIN_MODE", raw.get("mode", "test"))
+    config.mode = os.getenv("DARWIN_MODE", raw.get("mode", "live"))
 
     return config

@@ -42,6 +42,7 @@ class DarwinRuntime:
         self._last_account_sync = 0.0
         self._last_seen_audit_alert = 0
         self._runtime_started_monotonic = 0.0
+        self._last_start_error = ""
         self._starting_capital = max(self.config.starting_capital, 0.01)
         self._logger = logging.getLogger("darwin.runtime")
 
@@ -76,6 +77,19 @@ class DarwinRuntime:
         self.config.mode = "live"
         self.config.exchanges = [live_exchange]
 
+    async def validate_live_connectivity(self) -> None:
+        ex_cfg = self._load_live_binance_credentials()
+        adapter = BinanceAdapter(api_key=ex_cfg.api_key, api_secret=ex_cfg.api_secret, testnet=False)
+        try:
+            await adapter.validate_live_credentials()
+            self._logger.debug("Binance live credential connectivity check succeeded")
+        finally:
+            await adapter.close()
+
+    @property
+    def last_start_error(self) -> str:
+        return self._last_start_error
+
     def is_running(self) -> bool:
         with self._lock:
             return self.running and self.thread is not None and self.thread.is_alive()
@@ -87,7 +101,14 @@ class DarwinRuntime:
 
             requested_mode = (mode or "live").strip().lower()
             if requested_mode == "live":
-                self._enforce_live_binance()
+                try:
+                    self._enforce_live_binance()
+                    self._last_start_error = ""
+                except Exception as exc:
+                    self._last_start_error = str(exc)
+                    self.controller.update_status(state=BotState.ERROR, last_alert=self._last_start_error, mode="live")
+                    self.running = False
+                    return False
                 dashboard_mode = "live"
             else:
                 # Runtime currently only supports Binance adapter execution.
@@ -221,10 +242,16 @@ class DarwinRuntime:
             signal.signal = original_signal
 
     async def _status_monitor(self) -> None:
+        initial_live_sync_done = False
         while not self.stop_event.is_set():
             if self.controller.status.state == BotState.ERROR:
                 return
             s = self.controller.status
+
+            if self.config.mode == "live" and not initial_live_sync_done:
+                await self._sync_live_account_snapshot()
+                initial_live_sync_done = True
+
 
             equity = float(s.equity)
             peak = float(s.peak_equity)
@@ -246,7 +273,7 @@ class DarwinRuntime:
                 pnl_today=pnl_today,
                 exposure_by_symbol=dict(s.exposure_by_symbol),
                 state=BotState.RUNNING,
-                mode="live" if self.config.mode == "live" else "paper",
+                mode="LIVE" if self.config.mode == "live" else "paper",
                 started_at=s.started_at or datetime.now(timezone.utc).isoformat(),
                 uptime_seconds=uptime_seconds,
             )
@@ -257,12 +284,12 @@ class DarwinRuntime:
                 drawdown_pct,
                 leverage,
                 open_positions,
-                "live" if self.config.mode == "live" else "paper",
+                "LIVE" if self.config.mode == "live" else "paper",
                 uptime_seconds,
             )
 
             # Periodically sync real account data for dashboard visibility.
-            if self.config.mode == "live" and (time.monotonic() - self._last_account_sync) >= 10.0:
+            if self.config.mode == "live" and (time.monotonic() - self._last_account_sync) >= 30.0:
                 self._last_account_sync = time.monotonic()
                 await self._sync_live_account_snapshot()
 
@@ -310,15 +337,14 @@ class DarwinRuntime:
         )
         try:
             positions = await adapter.get_positions()
-            wallet_balance = float(await adapter.get_balance())
-            unrealized_pnl = 0.0
+            wallet_balance, unrealized_pnl = await adapter.get_wallet_balance_and_upnl()
+            self._logger.debug("Binance balance fetch succeeded wallet=%.4f upnl=%.4f", wallet_balance, unrealized_pnl)
             exposure_by_symbol = {}
             leverage_values = []
             for p in positions:
                 side_mult = -1.0 if str(getattr(p, "side", "")).endswith("SELL") else 1.0
                 size = float(getattr(p, "size", 0.0))
                 exposure_by_symbol[str(getattr(p, "symbol", ""))] = side_mult * size
-                unrealized_pnl += float(getattr(p, "unrealized_pnl", 0.0))
                 leverage_values.append(float(getattr(p, "leverage", 0.0)))
 
             equity = wallet_balance + unrealized_pnl
@@ -348,7 +374,7 @@ class DarwinRuntime:
                 pnl_today=unrealized_pnl,
                 exposure_by_symbol=exposure_by_symbol,
                 state=BotState.RUNNING,
-                mode="live",
+                mode="LIVE",
                 started_at=self.controller.status.started_at or datetime.now(timezone.utc).isoformat(),
                 uptime_seconds=uptime_seconds,
             )
@@ -361,6 +387,7 @@ class DarwinRuntime:
                 uptime_seconds,
             )
         except Exception as exc:
+            self._logger.debug("Binance balance fetch failed: %s", exc)
             self._record_error("account_sync_failed", exc)
             self.controller.update_status(last_alert=f"Live account sync failed: {str(exc)[:160]}")
         finally:

@@ -36,6 +36,7 @@ from dashboard.bot_controller import BotController, BotState
 from dashboard.bot_runtime import DarwinRuntime
 from dashboard.dash_logger import DashboardLogger
 from darwin_agent.monitoring.execution_audit import ExecutionAudit
+from darwin_agent.exchanges.binance import BinanceAdapter
 
 # ═══════════════════════════════════════════════════════
 # CONFIG
@@ -216,6 +217,35 @@ def _get_client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+def _get_latest_live_binance_credential() -> Optional[Dict[str, Any]]:
+    creds = sorted(db.list_credentials(), key=lambda c: c.get("id", 0), reverse=True)
+    live_rec = next((c for c in creds if str(c.get("exchange", "")).lower() == "binance" and not bool(c.get("testnet", 1))), None)
+    if not live_rec:
+        return None
+    return db.get_credential(int(live_rec["id"]))
+
+
+async def _validate_live_binance_credentials_or_raise() -> None:
+    if vault is None:
+        raise HTTPException(status_code=500, detail="DASHBOARD_SECRET_KEY is required to use live credentials")
+    rec = _get_latest_live_binance_credential()
+    if not rec:
+        raise HTTPException(status_code=422, detail="Live Binance credentials are required before starting in LIVE mode")
+    try:
+        api_key = vault.decrypt(rec["encrypted_api_key"])
+        api_secret = vault.decrypt(rec["encrypted_secret_key"])
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Failed to decrypt Binance credentials: {exc}")
+
+    adapter = BinanceAdapter(api_key=api_key, api_secret=api_secret, testnet=False)
+    try:
+        await adapter.validate_live_credentials()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Live Binance credential check failed: {exc}")
+    finally:
+        await adapter.close()
+
+
 # ── CSRF ──
 
 def _generate_csrf() -> str:
@@ -385,16 +415,22 @@ async def bot_start(body: BotStartRequest, request: Request,
                      sess: Dict = Depends(require_auth)):
     _check_csrf(request, sess)
     runner_fn = getattr(controller, "_runner_fn", None)
+    requested_mode = (body.mode or "paper").strip().lower()
+    if requested_mode == "live":
+        await _validate_live_binance_credentials_or_raise()
+
     if runner_fn is not None and getattr(runner_fn, "__name__", "") != "_runtime_runner":
-        result = controller.start(mode=body.mode)
+        result = controller.start(mode=requested_mode)
     else:
         runtime = _ensure_runtime()
-        started = runtime.start(mode=body.mode)
+        started = runtime.start(mode=requested_mode)
         result = {
             "ok": started,
             "state": "running" if started else "already_running",
-            "mode": body.mode,
+            "mode": requested_mode,
         }
+        if not started and runtime.last_start_error:
+            raise HTTPException(status_code=422, detail=runtime.last_start_error)
     dash_log.log(sess["username"], "BOT_START", _get_client_ip(request),
                  result["ok"], details=result)
     db.log_event(sess["username"], "BOT_START", _get_client_ip(request),
