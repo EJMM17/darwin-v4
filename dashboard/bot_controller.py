@@ -111,6 +111,19 @@ class BotController:
                 if hasattr(self._status, k):
                     setattr(self._status, k, v)
 
+    def mark_started(self, mode: str) -> None:
+        """Mark runtime start metadata when startup bypasses controller.start()."""
+        with self._lock:
+            self._started_at = time.time()
+            self._status.mode = mode
+            self._status.started_at = datetime.now(timezone.utc).isoformat()
+
+    def mark_stopped(self, state: BotState = BotState.STOPPED) -> None:
+        """Normalize stop metadata when runtime handles lifecycle directly."""
+        with self._lock:
+            self._status.state = state
+            self._status.uptime_seconds = 0.0
+
     def set_runner(self, fn: Callable) -> None:
         """Set the bot runner function. Must accept (stop_event, controller) args."""
         self._runner_fn = fn
