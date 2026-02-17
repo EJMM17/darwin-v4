@@ -162,6 +162,26 @@ def load_config(path: str | None = None) -> DarwinConfig:
             return default
         return raw_val.strip().lower() in {"1", "true", "yes", "on"}
 
+    def _env_float(name: str, default: float) -> float:
+        raw_val = os.getenv(name)
+        if raw_val is None or raw_val.strip() == "":
+            return default
+        try:
+            return float(raw_val)
+        except ValueError:
+            logger.warning("invalid float in %s=%r; using default=%s", name, raw_val, default)
+            return default
+
+    def _env_int(name: str, default: int) -> int:
+        raw_val = os.getenv(name)
+        if raw_val is None or raw_val.strip() == "":
+            return default
+        try:
+            return int(raw_val)
+        except ValueError:
+            logger.warning("invalid int in %s=%r; using default=%s", name, raw_val, default)
+            return default
+
     # Capital
     cap = raw.get("capital", raw)  # support flat or nested
     config.capital.starting_capital = float(
@@ -175,6 +195,7 @@ def load_config(path: str | None = None) -> DarwinConfig:
                        "max_consecutive_losses", "max_total_exposure_pct"):
         if field_name in risk:
             setattr(config.risk, field_name, type(getattr(config.risk, field_name))(risk[field_name]))
+    config.risk.max_position_pct = _env_float("DARWIN_RISK_PERCENT", config.risk.max_position_pct)
 
     # Evolution
     evo = raw.get("evolution", {})
@@ -211,7 +232,7 @@ def load_config(path: str | None = None) -> DarwinConfig:
                 testnet=_env_bool("DARWIN_TESTNET", bool(ex.get("testnet", False))),
                 futures_type=os.getenv("DARWIN_FUTURES_TYPE", ex.get("futures_type", "USDT-M")),
                 enabled=ex.get("enabled", True),
-                leverage=min(5, int(ex.get("leverage", 5))),
+                leverage=max(1, min(5, _env_int("DARWIN_LEVERAGE", int(ex.get("leverage", 5))))),
                 symbols=ex.get("symbols", ["BTCUSDT", "ETHUSDT", "SOLUSDT"]),
             )
             config.exchanges.append(exc)
@@ -223,6 +244,7 @@ def load_config(path: str | None = None) -> DarwinConfig:
         config.exchanges[0].futures_type = os.getenv("DARWIN_FUTURES_TYPE", config.exchanges[0].futures_type)
         config.exchanges[0].api_key = os.getenv(f"{default_exchange.upper()}_API_KEY", "")
         config.exchanges[0].api_secret = os.getenv(f"{default_exchange.upper()}_API_SECRET", "")
+        config.exchanges[0].leverage = max(1, min(5, _env_int("DARWIN_LEVERAGE", config.exchanges[0].leverage)))
 
     config.mode = os.getenv("DARWIN_MODE", raw.get("mode", "live"))
 

@@ -384,6 +384,7 @@ async def delete_credential(cred_id: int, request: Request,
 
 @app.get("/bot/status")
 async def bot_status(request: Request, sess: Dict = Depends(require_auth)):
+    runtime = _ensure_runtime()
     s = controller.status.to_dict()
 
     # Merge ExecutionAudit metrics if available
@@ -397,6 +398,13 @@ async def bot_status(request: Request, sess: Dict = Depends(require_auth)):
             s["alerts_total"] = int(m.get("darwin_alerts_total", 0))
         except Exception:
             pass
+
+    runtime_status = runtime.get_runtime_status()
+    s["is_running"] = runtime_status.get("is_running", False)
+    s["current_equity"] = runtime_status.get("current_equity", s.get("equity", 0.0))
+    s["positions"] = runtime_status.get("positions", s.get("exposure_by_symbol", {}))
+    s["drawdown"] = runtime_status.get("drawdown", s.get("drawdown_pct", 0.0))
+    s["last_update_timestamp"] = runtime_status.get("last_update_timestamp", "")
 
     _update_prometheus_metrics()
     return s
@@ -423,6 +431,7 @@ async def bot_start(body: BotStartRequest, request: Request,
         "ok": started,
         "state": "running" if started else "already_running",
         "mode": requested_mode,
+        "runtime": runtime.get_runtime_status(),
     }
     if not started and runtime.last_start_error:
         raise HTTPException(status_code=422, detail=runtime.last_start_error)

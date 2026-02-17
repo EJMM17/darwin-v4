@@ -341,3 +341,70 @@ def test_runtime_autostarts_on_app_start_when_enabled(monkeypatch, tmp_path):
         csrf = login.json()["csrf_token"]
         stop = client.post("/bot/stop", headers={"x-csrf-token": csrf})
         assert stop.status_code == 200
+
+def test_bot_status_includes_runtime_fields(monkeypatch, tmp_path):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("DASHBOARD_DB_PATH", str(tmp_path / "db.sqlite"))
+    monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "pw")
+
+    from importlib import reload
+    import dashboard.database
+    import dashboard.app
+    reload(dashboard.database)
+    reload(dashboard.app)
+
+    client = TestClient(dashboard.app.app)
+    with client:
+        login = client.post("/api/login", json={"username": "admin", "password": "pw"})
+        assert login.status_code == 200
+        status = client.get("/bot/status")
+        assert status.status_code == 200
+        payload = status.json()
+        assert {"is_running", "current_equity", "positions", "drawdown", "last_update_timestamp"}.issubset(payload.keys())
+
+
+def test_runtime_calculate_live_equity_formula():
+    import dashboard.bot_runtime as br
+    from dashboard.bot_controller import BotController
+    from darwin_agent.monitoring.execution_audit import ExecutionAudit
+
+    runtime = br.DarwinRuntime(controller=BotController(), audit=ExecutionAudit(log_dir="logs/audit-test-equity-formula"))
+    assert runtime.calculate_live_equity(100.0, 12.5) == 112.5
+
+
+def test_bot_stop_without_running_does_not_crash_dashboard(monkeypatch, tmp_path):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("DASHBOARD_DB_PATH", str(tmp_path / "db.sqlite"))
+    monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "pw")
+
+    from importlib import reload
+    import dashboard.database
+    import dashboard.app
+    reload(dashboard.database)
+    reload(dashboard.app)
+
+    client = TestClient(dashboard.app.app)
+    with client:
+        login = client.post("/api/login", json={"username": "admin", "password": "pw"})
+        csrf = login.json()["csrf_token"]
+        stop = client.post("/bot/stop", headers={"x-csrf-token": csrf})
+        assert stop.status_code == 200
+        assert stop.json()["state"] == "not_running"
+
+def test_config_env_overrides_for_runtime(monkeypatch):
+    from darwin_agent.config import load_config
+
+    monkeypatch.setenv("DARWIN_EXCHANGE", "binance")
+    monkeypatch.setenv("DARWIN_TESTNET", "1")
+    monkeypatch.setenv("DARWIN_LEVERAGE", "5")
+    monkeypatch.setenv("DARWIN_RISK_PERCENT", "1.25")
+
+    cfg = load_config(None)
+    assert cfg.exchanges[0].exchange_id == "binance"
+    assert cfg.exchanges[0].testnet is True
+    assert cfg.exchanges[0].leverage == 5
+    assert cfg.risk.max_position_pct == 1.25
