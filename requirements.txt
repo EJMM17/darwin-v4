@@ -16,3 +16,6 @@ pybit>=5.6.0                # Bybit API SDK
 
 # Dashboard (optional)
 # aiohttp-jinja2>=1.5       # pip install aiohttp-jinja2
+
+prometheus_client>=0.21.0
+requests>=2.32.0

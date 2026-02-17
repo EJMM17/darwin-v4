@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import secrets
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -25,13 +26,16 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from prometheus_client import CONTENT_TYPE_LATEST, Gauge, REGISTRY, generate_latest
 from pydantic import BaseModel, Field
 
 # Dashboard modules
 from dashboard.crypto_vault import CryptoVault
 from dashboard.database import Database
 from dashboard.bot_controller import BotController, BotState
+from dashboard.bot_runtime import DarwinRuntime
 from dashboard.dash_logger import DashboardLogger
+from darwin_agent.monitoring.execution_audit import ExecutionAudit
 
 # ═══════════════════════════════════════════════════════
 # CONFIG
@@ -50,6 +54,24 @@ controller = BotController()
 dash_log = DashboardLogger(log_dir="logs")
 sessions: Dict[str, Dict[str, Any]] = {}
 audit_ref = None  # set externally via set_execution_audit()
+runtime_ref: Optional[DarwinRuntime] = None
+runtime_lock = threading.Lock()
+
+
+def _metric_gauge(name: str, help_text: str) -> Gauge:
+    try:
+        return Gauge(name, help_text)
+    except ValueError:
+        return REGISTRY._names_to_collectors[name]
+
+
+METRIC_EQUITY = _metric_gauge("darwin_equity", "Current Darwin equity")
+METRIC_DRAWDOWN_PCT = _metric_gauge("darwin_drawdown_pct", "Current Darwin drawdown pct")
+METRIC_OPEN_POSITIONS = _metric_gauge("darwin_open_positions", "Current open positions")
+METRIC_SLIPPAGE_MEAN_BPS = _metric_gauge("darwin_slippage_mean_bps", "Mean slippage bps")
+METRIC_LATENCY_P95_MS = _metric_gauge("darwin_latency_p95_ms", "Latency p95 ms")
+METRIC_CB_TRIGGERS_TOTAL = _metric_gauge("darwin_cb_triggers_total", "Circuit breaker triggers")
+METRIC_ALERTS_TOTAL = _metric_gauge("darwin_alerts_total", "Execution alerts total")
 
 # ═══════════════════════════════════════════════════════
 # EXTERNAL INTEGRATION
@@ -66,6 +88,44 @@ def set_bot_runner(runner_fn) -> None:
     controller.set_runner(runner_fn)
 
 
+def _ensure_runtime() -> DarwinRuntime:
+    global runtime_ref, audit_ref
+    with runtime_lock:
+        if audit_ref is None:
+            audit_ref = ExecutionAudit(log_dir="logs/audit")
+        if runtime_ref is None:
+            runtime_ref = DarwinRuntime(controller=controller, audit=audit_ref)
+        return runtime_ref
+
+
+def _update_prometheus_metrics() -> None:
+    s = controller.status
+    METRIC_EQUITY.set(float(s.equity))
+    METRIC_DRAWDOWN_PCT.set(float(s.drawdown_pct))
+    METRIC_OPEN_POSITIONS.set(float(len(s.exposure_by_symbol)))
+
+    if audit_ref is not None:
+        try:
+            m = audit_ref.get_metrics()
+            METRIC_SLIPPAGE_MEAN_BPS.set(float(m.get("darwin_slippage_mean_bps", 0.0)))
+            METRIC_LATENCY_P95_MS.set(float(m.get("darwin_latency_p95_ms", 0.0)))
+            METRIC_CB_TRIGGERS_TOTAL.set(float(m.get("darwin_cb_triggers_total", 0.0)))
+            METRIC_ALERTS_TOTAL.set(float(m.get("darwin_alerts_total", 0.0)))
+        except Exception:
+            pass
+
+
+
+def _runtime_runner(stop_event, ctl):
+    runtime = _ensure_runtime()
+    runtime.start()
+
+
+set_execution_audit(ExecutionAudit(log_dir="logs/audit"))
+set_bot_runner(_runtime_runner)
+
+
+
 # ═══════════════════════════════════════════════════════
 # APP
 # ═══════════════════════════════════════════════════════
@@ -75,6 +135,7 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global vault
+    _ensure_runtime()
     try:
         vault = CryptoVault()
     except RuntimeError:
@@ -87,6 +148,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    if runtime_ref is not None:
+        runtime_ref.stop()
+    if audit_ref is not None:
+        audit_ref.close()
     dash_log.close()
 
 
@@ -311,6 +376,7 @@ async def bot_status(request: Request, sess: Dict = Depends(require_auth)):
         except Exception:
             pass
 
+    _update_prometheus_metrics()
     return s
 
 
@@ -318,23 +384,42 @@ async def bot_status(request: Request, sess: Dict = Depends(require_auth)):
 async def bot_start(body: BotStartRequest, request: Request,
                      sess: Dict = Depends(require_auth)):
     _check_csrf(request, sess)
-    result = controller.start(mode=body.mode)
+    runner_fn = getattr(controller, "_runner_fn", None)
+    if runner_fn is not None and getattr(runner_fn, "__name__", "") != "_runtime_runner":
+        result = controller.start(mode=body.mode)
+    else:
+        runtime = _ensure_runtime()
+        started = runtime.start()
+        result = {
+            "ok": started,
+            "state": "running" if started else "already_running",
+            "mode": body.mode,
+        }
     dash_log.log(sess["username"], "BOT_START", _get_client_ip(request),
                  result["ok"], details=result)
     db.log_event(sess["username"], "BOT_START", _get_client_ip(request),
                  result["ok"], result)
-    return result
+    return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
 
 @app.post("/bot/stop")
 async def bot_stop(request: Request, sess: Dict = Depends(require_auth)):
     _check_csrf(request, sess)
-    result = controller.stop()
+    runner_fn = getattr(controller, "_runner_fn", None)
+    if runner_fn is not None and getattr(runner_fn, "__name__", "") != "_runtime_runner":
+        result = controller.stop()
+    else:
+        runtime = _ensure_runtime()
+        stopped = runtime.stop()
+        result = {
+            "ok": True,
+            "state": "stopped" if stopped else "not_running",
+        }
     dash_log.log(sess["username"], "BOT_STOP", _get_client_ip(request),
                  result["ok"], details=result)
     db.log_event(sess["username"], "BOT_STOP", _get_client_ip(request),
                  result["ok"], result)
-    return result
+    return JSONResponse(result, status_code=200)
 
 
 @app.post("/bot/emergency-close")
@@ -383,6 +468,13 @@ async def event_log(request: Request, sess: Dict = Depends(require_auth)):
     return {"events": db.recent_events(50)}
 
 
+
+@app.get("/metrics")
+async def metrics():
+    _update_prometheus_metrics()
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 # ═══════════════════════════════════════════════════════
 # WEBSOCKET — REAL-TIME METRICS
 # ═══════════════════════════════════════════════════════
@@ -423,6 +515,7 @@ async def ws_metrics(websocket: WebSocket):
                 "ACTIVE" if s.get("running") else "IDLE"
             )
 
+            _update_prometheus_metrics()
             await websocket.send_json(s)
             await asyncio.sleep(2)
     except WebSocketDisconnect:

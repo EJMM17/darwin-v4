@@ -24,6 +24,7 @@ class BotState(Enum):
     RUNNING = "running"
     STOPPING = "stopping"
     EMERGENCY_LOCKED = "emergency_locked"
+    ERROR = "error"
 
 
 @dataclass
