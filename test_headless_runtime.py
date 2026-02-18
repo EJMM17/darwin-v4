@@ -117,6 +117,69 @@ def test_leverage_forced_to_5x(monkeypatch):
     assert b.got == 5
 
 
+def test_startup_logs_wallet_and_leverage(monkeypatch, caplog):
+    import darwin_agent.main as dm
+
+    class FakeRuntime:
+        def __init__(self):
+            self._symbols = ["BTCUSDT", "ETHUSDT"]
+            self._binance = object()
+
+        async def run_forever(self):
+            return 0
+
+        def stop(self):
+            return None
+
+    class FakeBinance:
+        def __init__(self):
+            self.set_calls = []
+
+        def ping_futures(self):
+            return None
+
+        def get_wallet_balance(self):
+            return 100.0
+
+        def get_open_positions(self):
+            return []
+
+        def set_leverage(self, symbol, leverage):
+            self.set_calls.append((symbol, leverage))
+            return leverage == 5
+
+        def close(self):
+            return None
+
+    class FakeTelegram:
+        def notify_engine_connected(self, payload):
+            self.payload = payload
+
+        def notify_error(self, _msg):
+            return None
+
+        def close(self):
+            return None
+
+    runtime = FakeRuntime()
+    binance = FakeBinance()
+    telegram = FakeTelegram()
+
+    monkeypatch.setattr(dm, "_create_runtime", lambda logger: (runtime, binance, telegram, object()))
+    caplog.set_level(logging.INFO)
+
+    code = asyncio.run(dm.run_live(logging.getLogger("test")))
+
+    assert code == 0
+    assert runtime._leverage == 5
+    assert runtime._symbols == ["BTCUSDT", "ETHUSDT"]
+    assert runtime._startup_state["wallet_balance"] == 100.0
+    assert ("BTCUSDT", 5) in binance.set_calls
+    assert ("ETHUSDT", 5) in binance.set_calls
+    assert "Wallet balance: 100.00000000 USDT" in caplog.text
+    assert "Leverage: 5x (forced)" in caplog.text
+
+
 def test_equity_uses_wallet_plus_unrealized_pnl():
     engine = DarwinCoreEngine(EngineConfig(risk_percent=1.0, leverage=5))
     snapshot = EquitySnapshot(wallet_balance=200.0, unrealized_pnl=-25.0)
