@@ -94,9 +94,18 @@ def test_leverage_forced_to_5x(monkeypatch):
     import darwin_agent.main as dm
 
     class FakeBinance:
-        def validate_startup(self, symbols, leverage):
+        def ping_futures(self):
+            return None
+
+        def get_wallet_balance(self):
+            return 100.0
+
+        def get_open_positions(self):
+            return []
+
+        def set_leverage(self, symbol, leverage):
             self.got = leverage
-            return {"wallet_balance": 100.0, "open_positions": [], "leverage_result": {s: leverage == 5 for s in symbols}}
+            return leverage == 5
 
     class FakeTelegram:
         def notify_engine_connected(self, payload):

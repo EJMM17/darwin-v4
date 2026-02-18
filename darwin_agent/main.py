@@ -71,8 +71,39 @@ def startup_validation(
     symbols: list[str],
     logger: logging.Logger,
 ) -> dict[str, Any]:
-    logger.info("startup validation begin")
-    result = binance.validate_startup(symbols=symbols, leverage=leverage)
+    logger.info("Initializing Binance Futures client...")
+    try:
+        binance.ping_futures()
+    except Exception as exc:
+        raise RuntimeError(f"Binance connection failed: {exc}") from exc
+    logger.info("Binance connection OK")
+
+    try:
+        wallet = float(binance.get_wallet_balance())
+    except Exception as exc:
+        raise RuntimeError(f"Wallet balance fetch failed: {exc}") from exc
+    if wallet <= 0:
+        raise RuntimeError(f"Wallet balance must be > 0, got {wallet}")
+    logger.info("Wallet balance: %.8f USDT", wallet)
+
+    positions = binance.get_open_positions()
+    logger.info("Positions synced: %d", len(positions))
+
+    leverage_result: dict[str, bool] = {}
+    for symbol in symbols:
+        logger.info("Setting leverage 5x on %s", symbol)
+        try:
+            leverage_result[symbol] = bool(binance.set_leverage(symbol, leverage))
+        except Exception as exc:
+            raise RuntimeError(f"Leverage set failed for {symbol}: {exc}") from exc
+        if not leverage_result[symbol]:
+            raise RuntimeError(f"Leverage set failed for {symbol}: exchange did not confirm {leverage}x")
+
+    result = {
+        "wallet_balance": wallet,
+        "open_positions": positions,
+        "leverage_result": leverage_result,
+    }
     telegram.notify_engine_connected(result)
     logger.info("startup validation success", extra={"event": "startup_validated", "symbols": len(symbols)})
     return result
@@ -125,9 +156,9 @@ async def run_live(logger: logging.Logger) -> int:
     signal.signal(signal.SIGINT, _request_shutdown)
 
     try:
-        await asyncio.to_thread(startup_validation, binance, telegram, 5, DEFAULT_SYMBOLS, logger)
+        startup = await asyncio.to_thread(startup_validation, binance, telegram, 5, DEFAULT_SYMBOLS, logger)
     except Exception as exc:
-        logger.error("startup validation failed: %s", exc, exc_info=True)
+        logger.error("fatal startup validation failed: %s", exc, exc_info=True)
         try:
             telegram.notify_error(f"startup failure: {exc}")
         except Exception:
@@ -136,7 +167,24 @@ async def run_live(logger: logging.Logger) -> int:
         telegram.close()
         return 1
 
+    if getattr(runtime, "_binance", None) is None:
+        logger.error("fatal startup validation failed: runtime has no exchange client")
+        binance.close()
+        telegram.close()
+        return 1
+    if float(startup["wallet_balance"]) <= 0:
+        logger.error("fatal startup validation failed: wallet balance must be > 0")
+        binance.close()
+        telegram.close()
+        return 1
+    if not all(bool(ok) for ok in startup["leverage_result"].values()):
+        logger.error("fatal startup validation failed: leverage enforcement did not succeed")
+        binance.close()
+        telegram.close()
+        return 1
+
     runtime_task = asyncio.create_task(runtime.run_forever())
+    logger.info("Runtime loop started")
     wait_task = asyncio.create_task(stop_event.wait())
     try:
         done, _ = await asyncio.wait({runtime_task, wait_task}, return_when=asyncio.FIRST_COMPLETED)
