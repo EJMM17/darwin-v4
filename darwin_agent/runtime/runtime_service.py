@@ -49,6 +49,9 @@ class RuntimeService:
         self._running = False
         self._retry_count = 0
         self._state = RuntimeState()
+        self._startup_state: dict[str, Any] = {}
+        self._leverage = 5
+        self._tick_count = 0
 
     def status(self) -> RuntimeStatus:
         return RuntimeStatus(running=self._running, retries=self._retry_count, safe_shutdown=self._safe_shutdown_flag)
@@ -64,7 +67,8 @@ class RuntimeService:
         self._stop_event.clear()
         self._running = True
         self._telegram.notify_engine_started()
-        self._logger.info("runtime loop started", extra={"event": "engine_started"})
+        self._tick_count = 0
+        self._logger.info("runtime loop started", extra={"event": "engine_started", "symbols": list(self._symbols), "leverage": self._leverage})
         try:
             while not self._stop_event.is_set():
                 try:
@@ -96,6 +100,7 @@ class RuntimeService:
             self._telegram.notify_engine_stopped()
 
     async def _run_once(self) -> None:
+        self._tick_count += 1
         wallet_balance = await asyncio.to_thread(self._binance.get_wallet_balance)
         upnl = await asyncio.to_thread(self._binance.get_unrealized_pnl)
         positions = await asyncio.to_thread(self._binance.get_open_positions)
@@ -118,5 +123,13 @@ class RuntimeService:
                 "equity": self._state.equity,
                 "positions": len(self._state.positions),
                 "drawdown_pct": self._state.drawdown_pct,
+                "symbols": list(self._symbols),
+                "leverage": self._leverage,
+                "tick_count": self._tick_count,
             },
         )
+
+        if self._tick_count % 60 == 0:
+            wallet = await asyncio.to_thread(self._binance.get_wallet_balance)
+            positions = await asyncio.to_thread(self._binance.get_open_positions)
+            self._logger.info("Heartbeat: wallet=%.4f open_positions=%d", wallet, len(positions))
