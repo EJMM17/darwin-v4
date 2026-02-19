@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
@@ -78,6 +79,7 @@ class V5EngineState:
     daily_start_equity: float = 0.0
     daily_pnl: float = 0.0
     last_heartbeat_tick: int = 0
+    current_day: int = -1  # track UTC date for daily reset
 
 
 class DarwinV5Engine:
@@ -312,6 +314,13 @@ class DarwinV5Engine:
                 (self._state.peak_equity - self._state.equity)
                 / self._state.peak_equity * 100.0
             )
+
+        # 1b. Daily reset check (UTC midnight)
+        today = datetime.datetime.now(datetime.timezone.utc).toordinal()
+        if self._state.current_day != today:
+            self._state.current_day = today
+            self._position_sizer.reset_daily(self._state.equity)
+            logger.info("daily reset: new equity baseline $%.4f", self._state.equity)
 
         # 2. Manage open positions (SL/TP check) BEFORE new signals
         await self._manage_open_positions(positions)

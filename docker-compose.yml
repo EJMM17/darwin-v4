@@ -39,7 +39,7 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       # ── Trading Config ────────────────────────────────────
-      - DARWIN_SYMBOLS=ETHUSDT,SOLUSDT,LINKUSDT
+      - DARWIN_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
       - DARWIN_LEVERAGE=10
       - DARWIN_RISK_PERCENT=2.0
       - DARWIN_TICK_INTERVAL=5.0
