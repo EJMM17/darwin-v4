@@ -28,8 +28,8 @@ logger = logging.getLogger("darwin.v5.execution")
 class ExecutionConfig:
     """Configuration for the execution engine."""
     leverage: int = 5
-    max_retries: int = 3
-    base_backoff_s: float = 1.0
+    max_retries: int = 2               # 2 retries (was 3) — scalping can't wait 14s total
+    base_backoff_s: float = 2.0        # 2s base (was 1s) — gives Binance time to clear rate limits
     max_backoff_s: float = 30.0
     slippage_tolerance_pct: float = 0.5
     fill_timeout_s: float = 10.0
@@ -262,11 +262,24 @@ class ExecutionEngine:
                 last_error = str(exc)
                 latency_ms = (time.time() - t_start) * 1000.0
 
-                # Check for timestamp error (400)
-                if "400" in last_error or "timestamp" in last_error.lower():
+                # Binance-specific error handling based on parsed code
+                # code=-1021: timestamp outside recvWindow → re-sync time
+                # code=-1003: rate limit hit → long backoff, don't hammer API
+                # code=-2010: insufficient balance → don't retry (won't fix itself)
+                if "code=-1021" in last_error or "timestamp" in last_error.lower():
                     if self._time_sync:
-                        logger.info("re-syncing time after 400 error")
+                        logger.warning("time sync error (-1021), re-syncing clock")
                         self._time_sync.force_sync_on_error(400)
+                elif "code=-1003" in last_error:
+                    logger.warning("rate limit hit (-1003), backing off 30s")
+                    await asyncio.sleep(30.0)
+                    break  # don't retry further, let next tick handle it
+                elif "code=-2010" in last_error:
+                    logger.error("insufficient balance (-2010), aborting retries")
+                    break  # no point retrying, balance won't change
+                elif "binance_400" in last_error and "code=" in last_error:
+                    # Any other Binance 400 — log it clearly but still retry
+                    logger.warning("binance error: %s", last_error)
 
                 if attempt < cfg.max_retries:
                     backoff = min(
@@ -313,7 +326,7 @@ class ExecutionEngine:
         else:
             params["timestamp"] = int(time.time() * 1000)
 
-        params["recvWindow"] = 5000
+        params["recvWindow"] = 10000  # increased from 5000 for high-latency servers (rtt~248ms)
 
         # Sign and send
         client = self._client
@@ -322,7 +335,21 @@ class ExecutionEngine:
         response = client._session.request(
             "POST", url, params=params, timeout=client._timeout_s
         )
-        response.raise_for_status()
+
+        # Parse Binance error code BEFORE raise_for_status so we log the real reason.
+        # raise_for_status() only gives "400 Bad Request" without the Binance code
+        # (e.g. -1021 timestamp, -1003 rate limit, -2010 balance, -1100 signature).
+        if not response.ok:
+            try:
+                err_body = response.json()
+                binance_code = err_body.get("code", 0)
+                binance_msg = err_body.get("msg", "unknown")
+                raise RuntimeError(
+                    f"binance_{response.status_code} code={binance_code} msg={binance_msg}"
+                )
+            except (ValueError, KeyError):
+                response.raise_for_status()
+
         data = response.json()
 
         # Parse fill
@@ -346,7 +373,7 @@ class ExecutionEngine:
                         if self._time_sync
                         else int(time.time() * 1000)
                     )
-                    check_params["recvWindow"] = 5000
+                    check_params["recvWindow"] = 10000
                     check_params["signature"] = client._sign(check_params)
                     check_url = f"{client._base_url}/fapi/v1/order"
                     check_resp = client._session.get(
