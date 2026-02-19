@@ -328,17 +328,50 @@ class ExecutionEngine:
         # Parse fill
         filled_qty = float(data.get("executedQty", 0.0))
         avg_price = float(data.get("avgPrice", 0.0))
+        order_id = str(data.get("orderId", ""))
+        status = data.get("status", "UNKNOWN")
+
+        # MARKET orders with status=NEW mean the fill is still processing.
+        # Poll up to 3 times (300ms each) until FILLED or CANCELED.
+        if order.order_type == "MARKET" and status == "NEW" and order_id:
+            for _ in range(3):
+                time.sleep(0.3)
+                try:
+                    check_params = {
+                        "symbol": order.symbol,
+                        "orderId": order_id,
+                    }
+                    check_params["timestamp"] = (
+                        self._time_sync.synced_timestamp()
+                        if self._time_sync
+                        else int(time.time() * 1000)
+                    )
+                    check_params["recvWindow"] = 5000
+                    check_params["signature"] = client._sign(check_params)
+                    check_url = f"{client._base_url}/fapi/v1/order"
+                    check_resp = client._session.get(
+                        check_url, params=check_params, timeout=client._timeout_s
+                    )
+                    check_resp.raise_for_status()
+                    check_data = check_resp.json()
+                    filled_qty = float(check_data.get("executedQty", filled_qty))
+                    avg_price = float(check_data.get("avgPrice", avg_price))
+                    status = check_data.get("status", status)
+                    if status in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
+                        break
+                except Exception:
+                    break  # keep whatever we have
+
         if avg_price == 0 and filled_qty > 0:
             avg_price = float(data.get("price", order.price))
 
         error_msg = ""
         if filled_qty == 0:
-            status = data.get("status", "UNKNOWN")
-            error_msg = f"zero_fill: status={status} orderId={data.get('orderId', '?')}"
+            error_msg = f"zero_fill: status={status} orderId={order_id}"
 
         return ExecutionResult(
             success=filled_qty > 0,
-            order_id=str(data.get("orderId", "")),
+            order_id=order_id,
             symbol=order.symbol,
             side=order.side,
             filled_qty=filled_qty,
