@@ -19,16 +19,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from darwin_agent.v5.time_sync import TimeSyncManager
 from darwin_agent.v5.health_monitor import HealthMonitor
 from darwin_agent.v5.telemetry import TelemetryReporter
 from darwin_agent.v5.market_data import MarketDataLayer
-from darwin_agent.v5.regime_detector import RegimeDetector, RegimeState, Regime
-from darwin_agent.v5.signal_generator import SignalGenerator, TradeSignal
+from darwin_agent.v5.regime_detector import RegimeDetector
+from darwin_agent.v5.signal_generator import SignalGenerator
 from darwin_agent.v5.position_sizer import PositionSizer, SizerConfig
 from darwin_agent.v5.execution_engine import (
     ExecutionEngine,

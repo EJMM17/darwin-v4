@@ -18,11 +18,10 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 from collections import deque
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, Optional
 
 
 class LogLevel(Enum):

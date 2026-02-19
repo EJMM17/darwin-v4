@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from darwin_agent.interfaces.enums import EventType, GrowthPhase
-from darwin_agent.interfaces.types import AgentMetrics, PhaseParams, TradeResult
+from darwin_agent.interfaces.enums import EventType
+from darwin_agent.interfaces.types import AgentMetrics, TradeResult
 
 
 def _utcnow() -> datetime:

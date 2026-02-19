@@ -36,10 +36,10 @@ from __future__ import annotations
 import math
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Deque, Dict, List, Optional
 
-from darwin_agent.monitoring.audit_logger import AuditLogger, LogLevel
+from darwin_agent.monitoring.audit_logger import AuditLogger
 
 
 # ═══════════════════════════════════════════════════════

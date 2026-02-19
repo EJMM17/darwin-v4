@@ -15,9 +15,8 @@ from __future__ import annotations
 import logging
 import math
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger("darwin.v5.market_data")
 

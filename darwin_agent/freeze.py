@@ -21,10 +21,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import random
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from darwin_agent.determinism import (
     lock_determinism,

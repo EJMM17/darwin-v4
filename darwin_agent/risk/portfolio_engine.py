@@ -64,10 +64,10 @@ import statistics
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Any, Deque, Dict, List, Optional
+from typing import Deque, Dict, List, Optional
 
 from darwin_agent.interfaces.enums import (
-    ExchangeID, OrderSide, PortfolioRiskState, SignalStrength,
+    OrderSide, PortfolioRiskState, SignalStrength,
 )
 from darwin_agent.interfaces.types import (
     PhaseParams, PortfolioRiskMetrics, Position,

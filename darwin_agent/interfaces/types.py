@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from darwin_agent.interfaces.enums import (
-    ExchangeID, GrowthPhase, MarketRegime, OrderSide, OrderType,
-    PortfolioRiskState, SignalStrength, StrategyID, TimeFrame,
+    ExchangeID, GrowthPhase, OrderSide, OrderType, PortfolioRiskState,
+    SignalStrength, StrategyID, TimeFrame,
 )
 
 

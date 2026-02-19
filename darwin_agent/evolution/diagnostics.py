@@ -43,9 +43,9 @@ import math
 import statistics
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Deque, Dict, List, Sequence, Tuple
 
-from darwin_agent.interfaces.types import AgentEvalData, AgentMetrics, DNAData
+from darwin_agent.interfaces.types import AgentEvalData, DNAData
 
 
 # ═════════════════════════════════════════════════════════════

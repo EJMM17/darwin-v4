@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
 
 from darwin_agent.diagnostics.rejection_reason import RejectionReason
 

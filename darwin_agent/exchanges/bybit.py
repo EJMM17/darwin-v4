@@ -12,7 +12,7 @@ import hmac
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List
 from urllib.parse import urlencode
 
 from darwin_agent.interfaces.enums import (

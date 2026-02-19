@@ -3,7 +3,7 @@ Darwin v4 — Protocols (abstract contracts).
 Layer 0. Depends only on interfaces.types + interfaces.enums.
 """
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Protocol, Sequence, runtime_checkable
+from typing import Dict, List, Optional, Protocol, Sequence, runtime_checkable
 
 from darwin_agent.interfaces.enums import ExchangeID, OrderSide, StrategyID, TimeFrame
 from darwin_agent.interfaces.types import (

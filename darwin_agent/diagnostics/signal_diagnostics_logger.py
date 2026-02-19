@@ -14,7 +14,6 @@ import logging
 import os
 import threading
 from datetime import datetime, timezone
-from typing import Optional
 
 from darwin_agent.diagnostics.signal_diagnostic import SignalDiagnostic
 

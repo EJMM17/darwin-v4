@@ -34,7 +34,6 @@ AUDIT FINDINGS:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from collections import deque
@@ -43,22 +42,22 @@ from datetime import datetime, timezone, timedelta
 from typing import Deque, Dict, List, Optional, Set
 
 from darwin_agent.interfaces.enums import (
-    AgentPhase, EventType, GrowthPhase, OrderSide, OrderType,
-    SignalStrength, StrategyID, TimeFrame,
+    AgentPhase, GrowthPhase, OrderSide, OrderType, SignalStrength,
+    StrategyID, TimeFrame,
 )
 from darwin_agent.interfaces.types import (
-    AgentMetrics, AllocationSlice, Candle, OrderRequest, OrderResult,
-    PhaseParams, Position, RiskVerdict, Signal, TradeResult,
+    AgentMetrics, AllocationSlice, OrderRequest, PhaseParams, Position,
+    Signal, TradeResult,
 )
 from darwin_agent.interfaces.events import (
-    Event, agent_died_event, agent_spawned_event,
-    generation_complete_event, trade_closed_event, trade_opened_event,
+    agent_died_event, generation_complete_event, trade_closed_event,
+    trade_opened_event,
 )
 from darwin_agent.interfaces.protocols import (
     IEventBus, IExchangeAdapter, IFeatureEngine,
     IPositionSizer, IRiskGate, IStrategy, IStrategySelector,
 )
-from darwin_agent.evolution.fitness import RiskAwareFitness, compute_fitness
+from darwin_agent.evolution.fitness import compute_fitness
 
 logger = logging.getLogger("darwin.agent")
 

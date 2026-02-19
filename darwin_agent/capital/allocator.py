@@ -11,7 +11,6 @@ import math
 from enum import Enum, auto
 from typing import Dict, List
 
-from darwin_agent.interfaces.enums import GrowthPhase
 from darwin_agent.interfaces.types import AllocationSlice, PhaseParams
 
 from darwin_agent.capital.phases import PhaseManager

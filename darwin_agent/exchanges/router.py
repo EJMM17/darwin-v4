@@ -37,7 +37,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from darwin_agent.interfaces.enums import ExchangeID, OrderSide, TimeFrame
 from darwin_agent.interfaces.types import (

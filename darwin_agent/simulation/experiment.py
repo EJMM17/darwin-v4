@@ -49,15 +49,14 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 from darwin_agent.simulation.harness import (
     MarketScenario, MonteCarloScenario, SimConfig, SimulationHarness,
     SimulationResults,
 )
 from darwin_agent.simulation.scorecard import (
-    GenerationData, ScorecardReport, ScorecardWeights,
-    SimulationScorecard,
+    GenerationData, ScorecardWeights, SimulationScorecard,
 )
 from darwin_agent.risk.portfolio_engine import RiskLimits
 
@@ -539,7 +538,6 @@ class ExperimentRunner:
         variations: List[ConfigVariation],
     ) -> List[VariationSummary]:
         """Aggregate RunResults per config_id into VariationSummary."""
-        import statistics as stats
 
         # Group by config_id
         by_config: Dict[str, List[RunResult]] = {}

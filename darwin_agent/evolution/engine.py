@@ -41,7 +41,7 @@ import random
 import statistics
 from darwin_agent.determinism import next_deterministic_id
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 # EventType reserved for future event bus integration
 from darwin_agent.interfaces.types import (
