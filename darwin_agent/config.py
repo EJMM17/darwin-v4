@@ -92,6 +92,9 @@ class InfraConfig:
     log_file: str = "darwin.log"
     # Tick interval (seconds)
     tick_interval: float = 60.0
+    # Signal diagnostics (observability only — does not affect trading logic)
+    enable_signal_diagnostics: bool = True
+    telegram_debug: bool = False
 
 @dataclass
 class DarwinConfig:
@@ -216,6 +219,14 @@ def load_config(path: str | None = None) -> DarwinConfig:
         infra.get("dashboard_port", 8080)))
     config.infra.tick_interval = float(infra.get("tick_interval", 60.0))
     config.infra.log_level = os.getenv("LOG_LEVEL", infra.get("log_level", "INFO"))
+    config.infra.enable_signal_diagnostics = _env_bool(
+        "ENABLE_SIGNAL_DIAGNOSTICS",
+        infra.get("enable_signal_diagnostics", True),
+    )
+    config.infra.telegram_debug = _env_bool(
+        "TELEGRAM_DEBUG",
+        infra.get("telegram_debug", False),
+    )
 
     # Exchanges
     exchanges_raw = raw.get("exchanges", [])
