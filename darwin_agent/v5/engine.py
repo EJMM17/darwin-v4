@@ -128,6 +128,7 @@ class DarwinV5Engine:
             self._telemetry,
             ExecutionConfig(leverage=self._config.leverage),
         )
+        self._symbol_step_sizes: Dict[str, float] = {}  # populated on startup
         self._monte_carlo = MonteCarloValidator()
         self._portfolio = PortfolioConstructor(self._config.symbols)
 
@@ -197,6 +198,7 @@ class DarwinV5Engine:
                 self._binance.get_symbol_step_sizes, self._config.symbols
             )
             self._execution_engine.load_symbol_info(step_sizes)
+            self._symbol_step_sizes = step_sizes  # also keep locally for position sizing
             logger.info("symbol step sizes loaded: %s", step_sizes)
         except Exception as exc:
             logger.warning("could not load symbol step sizes, using defaults: %s", exc)
@@ -537,6 +539,7 @@ class DarwinV5Engine:
             regime_multiplier=regime.risk_multiplier,
             signal_confidence=signal.confidence,
             current_exposure=current_exposure,
+            step_size=self._symbol_step_sizes.get(symbol, 0.0),
         )
 
         if not size_result.approved:

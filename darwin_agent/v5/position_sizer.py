@@ -115,6 +115,7 @@ class PositionSizer:
         regime_multiplier: float,
         signal_confidence: float,
         current_exposure: float = 0.0,
+        step_size: float = 0.0,
     ) -> SizeResult:
         """
         Compute position size for a new trade.
@@ -135,6 +136,10 @@ class PositionSizer:
             Signal confidence (0-1), used to scale position.
         current_exposure : float
             Current total portfolio exposure in USDT.
+        step_size : float
+            Minimum quantity increment for this symbol (e.g. 0.001 for BTC).
+            If provided, quantity is rounded to this step and notional is
+            re-checked AFTER rounding to avoid validation_failed: rounds to 0.
 
         Returns
         -------
@@ -207,12 +212,24 @@ class PositionSizer:
 
         # Compute quantity
         quantity = position_size / price
+
+        # Apply step_size rounding BEFORE notional check.
+        # Bug: validating notional on raw quantity (e.g. 0.000167 BTC = $16 OK),
+        # then rounding in execution_engine makes it 0.000 BTC = $0 → Binance error.
+        # Fix: round here so the check uses the actual quantity that will be sent.
+        import math as _math
+        if step_size > 0:
+            quantity = _math.floor(quantity / step_size) * step_size
+
         notional = quantity * price
 
-        # Min notional check
+        # Min notional check (post-rounding)
         if notional < cfg.min_notional_usdt:
             result.approved = False
-            result.rejection_reason = f"notional ${notional:.2f} < min ${cfg.min_notional_usdt}"
+            result.rejection_reason = (
+                f"notional ${notional:.2f} < min ${cfg.min_notional_usdt}"
+                + (f" (rounds to 0 with step={step_size})" if step_size > 0 and quantity == 0 else "")
+            )
             return result
 
         result.position_size_usdt = position_size
