@@ -43,6 +43,8 @@ services:
       - DARWIN_LEVERAGE=10
       - DARWIN_RISK_PERCENT=2.0
       - DARWIN_CONFIDENCE_THRESHOLD=0.60
+      - DARWIN_STOP_LOSS_PCT=1.5
+      - DARWIN_TAKE_PROFIT_PCT=3.0
       # ── Safety ────────────────────────────────────────────
       - DARWIN_TESTNET=false
     ports:

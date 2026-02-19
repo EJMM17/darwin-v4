@@ -53,6 +53,9 @@ class V5EngineConfig:
     leverage: int = 5
     base_risk_pct: float = 1.0
     confidence_threshold: float = 0.60
+    # Risk per trade
+    stop_loss_pct: float = 1.5      # Stop loss: 1.5% contra la posición
+    take_profit_pct: float = 3.0    # Take profit: 3.0% a favor (ratio 2:1)
     # Mode
     dry_run: bool = False
     # Max retries before fatal
@@ -312,7 +315,10 @@ class DarwinV5Engine:
                 / self._state.peak_equity * 100.0
             )
 
-        # 2. Compute features for all symbols + BTC reference
+        # 2. Manage open positions (SL/TP check) BEFORE new signals
+        await self._manage_open_positions(positions)
+
+        # 3. Compute features for all symbols + BTC reference
         btc_features = await asyncio.to_thread(
             self._market_data.compute_features, "BTCUSDT"
         )
@@ -355,6 +361,101 @@ class DarwinV5Engine:
             len(positions),
             self._state.current_regime,
         )
+
+
+    async def _manage_open_positions(self, positions: list) -> None:
+        """
+        Check all open positions for stop loss / take profit.
+        Closes position immediately if SL or TP is breached.
+        """
+        if not positions:
+            return
+
+        cfg = self._config
+        sl_pct = cfg.stop_loss_pct / 100.0
+        tp_pct = cfg.take_profit_pct / 100.0
+
+        for pos in positions:
+            symbol = pos.get("symbol", "")
+            amt = float(pos.get("positionAmt", 0.0))
+            if amt == 0.0:
+                continue
+
+            entry_price = float(pos.get("entryPrice", 0.0))
+            if entry_price <= 0:
+                continue
+
+            # Get current price
+            try:
+                features = await asyncio.to_thread(
+                    self._market_data.compute_features, symbol
+                )
+                current_price = features.close
+            except Exception:
+                continue
+
+            if current_price <= 0:
+                continue
+
+            # Determine direction
+            is_long = amt > 0
+            pnl_pct = (
+                (current_price - entry_price) / entry_price
+                if is_long
+                else (entry_price - current_price) / entry_price
+            )
+
+            close_reason = ""
+            if pnl_pct <= -sl_pct:
+                close_reason = f"STOP_LOSS ({pnl_pct*100:.2f}%)"
+            elif pnl_pct >= tp_pct:
+                close_reason = f"TAKE_PROFIT ({pnl_pct*100:.2f}%)"
+
+            if not close_reason:
+                continue
+
+            # Close position: opposite side, reduceOnly
+            close_side = "SELL" if is_long else "BUY"
+            close_qty = abs(amt)
+
+            logger.info(
+                "closing %s %s qty=%.6f reason=%s entry=%.2f current=%.2f",
+                close_side, symbol, close_qty, close_reason, entry_price, current_price,
+            )
+
+            from darwin_agent.v5.execution_engine import OrderRequest as V5CloseRequest
+            close_order = V5CloseRequest(
+                symbol=symbol,
+                side=close_side,
+                quantity=close_qty,
+                price=current_price,
+                leverage=cfg.leverage,
+                reduce_only=True,
+            )
+
+            result = await self._execution_engine.place_order(
+                close_order, dry_run=cfg.dry_run
+            )
+
+            if result.success:
+                pnl_usdt = pnl_pct * entry_price * close_qty
+                self._position_sizer.record_trade_pnl(pnl_usdt)
+                self._state.trade_pnls.append(pnl_usdt)
+                self._telegram.notify_position_closed(
+                    symbol=symbol,
+                    pnl=pnl_usdt,
+                    pnl_pct=pnl_pct * 100.0,
+                    reason=close_reason,
+                    equity=self._state.equity,
+                )
+                logger.info(
+                    "position closed: %s pnl=%.4f (%+.2f%%) reason=%s",
+                    symbol, pnl_usdt, pnl_pct * 100.0, close_reason,
+                )
+            else:
+                logger.error(
+                    "FAILED to close position %s: %s", symbol, result.error
+                )
 
     async def _process_symbol(self, symbol: str, btc_features: Any) -> None:
         """Process one symbol through the full pipeline."""

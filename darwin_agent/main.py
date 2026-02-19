@@ -253,6 +253,8 @@ async def run_v5(logger: logging.Logger, dry_run: bool = False) -> int:
         leverage=int(os.getenv("DARWIN_LEVERAGE", "5")),
         base_risk_pct=float(os.getenv("DARWIN_RISK_PERCENT", "1.0")),
         confidence_threshold=float(os.getenv("DARWIN_CONFIDENCE_THRESHOLD", "0.60")),
+        stop_loss_pct=float(os.getenv("DARWIN_STOP_LOSS_PCT", "1.5")),
+        take_profit_pct=float(os.getenv("DARWIN_TAKE_PROFIT_PCT", "3.0")),
         dry_run=dry_run,
     )
 
