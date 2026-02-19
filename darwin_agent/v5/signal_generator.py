@@ -214,6 +214,9 @@ class SignalGenerator:
         """
         Mean reversion factor: distance from mean + z-score significance.
 
+        Amplified by volume surge (Kakushadze & Serur §10.3.1): larger volume
+        spikes suggest greater overreaction, so a stronger snap-back is expected.
+
         Positive = price above mean (short signal for MR).
         Negative = price below mean (long signal for MR).
         We invert so positive = long opportunity.
@@ -222,10 +225,21 @@ class SignalGenerator:
         z_50 = features.z_score_50
         dist = features.distance_from_mean_20
 
-        # Combine z-scores with distance
-        # Invert: extreme low = high long signal
+        # Base MR score (invert: extreme low = high long signal)
         mr_score = -(0.4 * z_20 + 0.3 * z_50 + 0.3 * dist * 10.0)
-        return mr_score
+
+        # Volume filter: amplify signal when recent volume surges above average
+        # High volume overreaction → stronger mean-reversion expected
+        vol_scale = 1.0
+        if features.volumes and len(features.volumes) >= 20:
+            recent_vol = sum(features.volumes[-5:]) / 5.0
+            avg_vol = sum(features.volumes[-20:]) / 20.0
+            if avg_vol > 0:
+                vol_ratio = recent_vol / avg_vol
+                # Scale: ratio=1.5 → 1.15x, ratio=2.0 → 1.3x, ratio=3.0 → 1.5x (capped)
+                vol_scale = min(1.5, 1.0 + 0.3 * math.log(max(1.0, vol_ratio)))
+
+        return mr_score * vol_scale
 
     def _compute_residual_alpha(
         self,
@@ -322,16 +336,24 @@ class SignalGenerator:
         regime: RegimeState,
         features: Any,
     ) -> str:
-        """Determine trade direction from weighted factor scores."""
+        """
+        Determine trade direction from weighted factor scores.
+
+        Uses tanh smoothing (Kakushadze & Serur §10.4 eq.475) instead of
+        sign() to avoid direction flips from small noisy changes near zero.
+        η = tanh(combined / κ) where κ normalizes the score range.
+        """
         combined = sum(weights[k] * z_scores[k] for k in z_scores)
 
-        if abs(combined) < 0.1:
-            return ""  # no clear direction
+        # tanh smoothing: κ = 0.5 maps |combined|=1 → η≈0.46, |combined|=2 → η≈0.76
+        # This prevents unstable flips when combined is near zero
+        κ = 0.5
+        smoothed = math.tanh(combined / κ)
 
-        if combined > 0:
-            return "LONG"
-        else:
-            return "SHORT"
+        if abs(smoothed) < 0.15:  # dead zone: no clear direction
+            return ""
+
+        return "LONG" if smoothed > 0 else "SHORT"
 
     def _check_gates(
         self,
