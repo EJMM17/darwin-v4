@@ -262,13 +262,22 @@ class ExecutionEngine:
                 last_error = str(exc)
                 latency_ms = (time.time() - t_start) * 1000.0
 
-                # Binance-specific error handling based on parsed code
+                # Binance-specific error handling based on parsed code.
+                # NOTE: if response.json() fails (empty body), requests raises a plain
+                # "400 Client Error: Bad Request" without a Binance code.
+                # We treat any 400 as a potential timestamp issue and always re-sync.
                 # code=-1021: timestamp outside recvWindow → re-sync time
                 # code=-1003: rate limit hit → long backoff, don't hammer API
                 # code=-2010: insufficient balance → don't retry (won't fix itself)
-                if "code=-1021" in last_error or "timestamp" in last_error.lower():
+                is_400 = (
+                    "code=-1021" in last_error
+                    or "timestamp" in last_error.lower()
+                    or "400 Client Error" in last_error   # generic Bad Request fallback
+                    or "Bad Request" in last_error
+                )
+                if is_400:
                     if self._time_sync:
-                        logger.warning("time sync error (-1021), re-syncing clock")
+                        logger.warning("time sync triggered on 400 error, re-syncing clock")
                         self._time_sync.force_sync_on_error(400)
                 elif "code=-1003" in last_error:
                     logger.warning("rate limit hit (-1003), backing off 30s")
@@ -277,8 +286,8 @@ class ExecutionEngine:
                 elif "code=-2010" in last_error:
                     logger.error("insufficient balance (-2010), aborting retries")
                     break  # no point retrying, balance won't change
-                elif "binance_400" in last_error and "code=" in last_error:
-                    # Any other Binance 400 — log it clearly but still retry
+                else:
+                    # Any other Binance error — log it clearly and still retry
                     logger.warning("binance error: %s", last_error)
 
                 if attempt < cfg.max_retries:
