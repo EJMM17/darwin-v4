@@ -411,8 +411,8 @@ class ExperimentRunner:
                                sim_results.starting_capital) * 100
 
                 sc_dict = scorecard.to_dict()
-                scores = sc_dict.get("scores", {})
 
+                sc_dict = scorecard.to_dict()
                 run_result = RunResult(
                     config_id=var.config_id,
                     seed=seed,

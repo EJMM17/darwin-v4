@@ -196,7 +196,6 @@ class SignalGenerator:
 
         Positive = bullish momentum, negative = bearish.
         """
-        cfg = self._config
         rocs = []
         if features.roc_20 != 0:
             rocs.append(features.roc_20)

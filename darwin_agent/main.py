@@ -82,7 +82,6 @@ def startup_validation(
     if not symbols:
         raise RuntimeError("No trading symbols configured. DEFAULT_SYMBOLS is empty.")
 
-    leverage = 5
     logger.info("Initializing Binance Futures client...")
     try:
         binance.ping_futures()

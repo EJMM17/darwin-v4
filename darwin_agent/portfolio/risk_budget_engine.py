@@ -21,7 +21,7 @@ Usage:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List
 
 
@@ -193,7 +193,9 @@ class RiskBudgetEngine:
         )
 
         # ── Composite multiplier ─────────────────────────
-        raw = dd_penalty * vol_penalty + pf_bonus
+        # PF bonus modifies the base before vol scaling so it doesn't
+        # bypass volatility risk: raw = (dd_penalty + pf_bonus) * vol_penalty
+        raw = (dd_penalty + pf_bonus) * vol_penalty
         rbe_mult = self._clamp(raw, cfg.mult_floor, cfg.mult_ceil)
 
         self._last_mult = rbe_mult

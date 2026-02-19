@@ -173,7 +173,6 @@ class ExecutionEngine:
         ExecutionResult
             Execution outcome.
         """
-        cfg = self._config
         self._total_orders += 1
 
         # Validate
@@ -348,7 +347,7 @@ class ExecutionEngine:
         """Round quantity down to nearest step size."""
         if step <= 0:
             return quantity
-        precision = max(0, -int(math.floor(math.log10(step))))
+        # Round quantity to the step's precision without float drift
         return math.floor(quantity / step) * step
 
     def get_metrics(self) -> Dict[str, Any]:

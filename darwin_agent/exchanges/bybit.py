@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -127,7 +126,7 @@ class BybitAdapter:
                     return data.get("result", {})
                 logger.warning("bybit error: %s", data.get("retMsg"))
                 return data
-            except Exception as exc:
+            except Exception:
                 if attempt < 2:
                     await asyncio.sleep(1 * (attempt + 1))
                 else:

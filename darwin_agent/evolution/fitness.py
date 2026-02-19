@@ -6,14 +6,16 @@ v4.3 → v4.4: adds activity penalty + expectancy convexity.
   ┌─────────────────────┬────────┬──────────────────────────────────────────┐
   │ Pillar              │ Weight │ Sub-components                           │
   ├─────────────────────┼────────┼──────────────────────────────────────────┤
-  │ ecosystem_health    │ 0.25   │ portfolio_harmony, diversification,      │
+  │ ecosystem_health    │ 0.22   │ portfolio_harmony, diversification,      │
   │                     │        │ consistency                              │
-  │ risk_stability      │ 0.20   │ drawdown_health, sharpe_quality          │
-  │ learning_quality    │ 0.15   │ risk_adj_profit, capital_efficiency,     │
+  │ risk_stability      │ 0.18   │ drawdown_health, sharpe_quality          │
+  │ learning_quality    │ 0.13   │ risk_adj_profit, capital_efficiency,     │
   │                     │        │ capital_velocity, tp_shaping             │
-  │ profit_factor_score │ 0.15   │ tanh((PF - 1.0) * 2.5)                  │
-  │ efficiency_score    │ 0.10   │ clamp(net_pnl / notional * 50, -1, +1)  │
-  │ trend_score         │ 0.15   │ clamp(trend_capture_ratio * 3, -1, +1)  │
+  │ profit_factor_score │ 0.13   │ tanh((PF - 1.0) * 2.5)                  │
+  │ efficiency_score    │ 0.08   │ clamp(net_pnl / notional * 50, -1, +1)  │
+  │ trend_score         │ 0.13   │ clamp(trend_capture_ratio * 3, -1, +1)  │
+  │ activity_score      │ 0.05   │ overtrading + inactivity penalty         │
+  │ convexity_score     │ 0.08   │ tanh(alpha * (avg_win/avg_loss - 1))     │
   └─────────────────────┴────────┴──────────────────────────────────────────┘
 """
 from __future__ import annotations
@@ -21,10 +23,10 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Sequence
 
 from darwin_agent.interfaces.enums import PortfolioRiskState
-from darwin_agent.interfaces.types import PortfolioRiskMetrics, TradeResult
+from darwin_agent.interfaces.types import PortfolioRiskMetrics
 
 
 # ── Configuration ────────────────────────────────────────────
@@ -75,8 +77,10 @@ class FitnessConfig:
     pf_sensitivity: float = 2.5
     eff_scale: float = 50.0
     trend_capture_scale: float = 3.0
-    # activity penalty (v4.4)
-    k_activity: float = 8.0
+    # activity penalty (v4.4): exp(-k * trade_freq)
+    # k=4.0: penalizes trade_freq>0.5 (>1 trade per 2 bars).
+    # Original k=8.0 was too aggressive, crushing active scalpers at freq=1.0.
+    k_activity: float = 4.0
     # expectancy convexity (v4.4)
     convexity_alpha: float = 1.5
 

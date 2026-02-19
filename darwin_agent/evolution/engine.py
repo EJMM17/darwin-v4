@@ -37,16 +37,13 @@ Architecture remains clean:
 from __future__ import annotations
 
 import logging
-import math
 import random
 import statistics
-import uuid
 from darwin_agent.determinism import next_deterministic_id
-from collections import deque
 from datetime import datetime, timezone
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from darwin_agent.interfaces.enums import EventType
+# EventType reserved for future event bus integration
 from darwin_agent.interfaces.types import (
     AgentEvalData, AgentMetrics, DNAData, GenerationSnapshot,
     PortfolioRiskMetrics,
@@ -54,6 +51,11 @@ from darwin_agent.interfaces.types import (
 from darwin_agent.evolution.fitness import (
     FitnessBreakdown, FitnessConfig, RiskAwareFitness,
 )
+
+try:
+    from darwin_agent.evolution.archive import EliteArchive
+except ImportError:
+    EliteArchive = None  # type: ignore
 
 logger = logging.getLogger("darwin.evolution")
 
@@ -513,7 +515,7 @@ class EvolutionEngine:
 
         # Calculate injection count
         n_inject = max(1, int(pool_size * archive.injection_ratio))
-        n_random = pool_size - n_inject
+        # n_inject may be less than requested if archive has fewer entries
 
         # Select from archive (with deduplication + injection limits)
         selected = archive.select_for_injection(n_inject, selection_rng)

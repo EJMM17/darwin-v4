@@ -110,7 +110,8 @@ def _update_prometheus_metrics() -> None:
         except Exception:
             pass
 
-set_execution_audit(ExecutionAudit(log_dir="logs/audit"))
+# Note: ExecutionAudit is initialized lazily via _ensure_runtime() on first request.
+# Do NOT instantiate here to avoid unclosed instances before lifespan runs.
 
 
 
@@ -119,6 +120,19 @@ set_execution_audit(ExecutionAudit(log_dir="logs/audit"))
 # ═══════════════════════════════════════════════════════
 
 from contextlib import asynccontextmanager
+
+
+def _cleanup_expired_sessions() -> int:
+    """Remove expired sessions from the in-memory store. Returns count removed."""
+    now = time.time()
+    expired = [
+        token for token, sess in list(sessions.items())
+        if now - sess["created_at"] > SESSION_MAX_AGE
+    ]
+    for token in expired:
+        sessions.pop(token, None)
+    return len(expired)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

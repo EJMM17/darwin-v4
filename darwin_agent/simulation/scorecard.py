@@ -51,7 +51,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Sequence
 
 
 # ═════════════════════════════════════════════════════════════
@@ -588,8 +588,6 @@ class SimulationScorecard:
                              agents learned to actually participate.
                              0 trades → 0, 20+ per agent → 10
         """
-        n = len(gens)
-
         # Fitness trend
         fitnesses = [g.avg_fitness for g in gens]
         fit_slope = _ols_slope(fitnesses)

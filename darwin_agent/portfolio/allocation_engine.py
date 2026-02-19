@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 
 # ── Configuration ────────────────────────────────────────────
@@ -263,20 +263,27 @@ class PortfolioAllocationEngine:
     @staticmethod
     def _compute_score(metrics: Dict[str, float]) -> float:
         """
-        Performance score:
-            score = (PF × (return / maxDD)) / volatility
+        Performance score: Calmar-adjusted profit factor, volatility-penalized.
+
+            score = max(0, pf × ret / maxDD) / sqrt(vol)
+
+        Using sqrt(vol) instead of vol directly reduces the over-penalization
+        of high-volatility crypto assets relative to their actual risk profile.
 
         Handles edge cases:
-        - Negative return → score is negative (penalized, floored to 0)
-        - Very low volatility → score capped naturally by vol_floor
+        - Negative return → score floored to 0 (gets minimum weight)
+        - Zero maxdd → guarded by dd_floor in config (min 1%)
+        - Very low volatility → guarded by vol_floor (min 0.001)
         """
         pf = metrics["pf"]
         ret = metrics["return"]
         maxdd = metrics["maxdd"]
         vol = metrics["volatility"]
 
-        raw = (pf * (ret / maxdd)) / vol
-        # Floor at 0: negative-performing symbols get minimum weight, not negative
+        if ret <= 0:
+            return 0.0
+        # Use sqrt(vol) to avoid over-penalizing normally-volatile crypto
+        raw = (pf * ret / maxdd) / (vol ** 0.5)
         return max(0.0, raw)
 
     # ── Constraint engine ────────────────────────────────────

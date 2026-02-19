@@ -58,7 +58,6 @@ USAGE:
 """
 from __future__ import annotations
 
-import asyncio
 import csv
 import io
 import json
@@ -68,19 +67,17 @@ import random
 import statistics
 import uuid
 from abc import ABC, abstractmethod
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional
 
 from darwin_agent.interfaces.enums import PortfolioRiskState
 from darwin_agent.interfaces.types import (
     AgentEvalData, AgentMetrics, DNAData,
-    GenerationSnapshot, PortfolioRiskMetrics,
+    GenerationSnapshot,
 )
 from darwin_agent.evolution.engine import EvolutionEngine, DEFAULT_GENE_RANGES
-from darwin_agent.evolution.fitness import FitnessBreakdown
 from darwin_agent.evolution.diagnostics import EvolutionDiagnostics
 from darwin_agent.risk.portfolio_engine import PortfolioRiskEngine, RiskLimits
 
@@ -885,9 +882,8 @@ class SimulatedAgent:
         trend_w = genes.get("trend_strength_weight", 0.0)
         vol_w = genes.get("volatility_weight", 0.0)
         macro_w = genes.get("macro_regime_weight", 0.0)
-        # Soft regime modulation genes
-        regime_trend_th = genes.get("regime_trend_gate", 0.02)
-        regime_vol_th = genes.get("regime_vol_gate", 0.01)
+        # regime_trend_gate / regime_vol_gate genes preserved in genome for
+        # future soft regime modulation layer. Bypassed in current F4.4 mode.
 
         for sym, tick in ticks.items():
             # ── Legacy pseudo-signals (always active) ────
@@ -940,7 +936,6 @@ class SimulatedAgent:
             # ── Soft Regime Modulation (bypassed for pure F4.4) ──
             # regime genes remain in genome for future activation
             # regime_factor = 1.0 (no modulation)
-
             # Normalize to approximate [-1, 1] via tanh
             signal = math.tanh(raw)
 
@@ -1056,7 +1051,13 @@ class SimulatedAgent:
             mu = statistics.mean(self._sharpe_returns)
             sd = statistics.stdev(self._sharpe_returns)
             if sd > 0:
-                sharpe = (mu / sd) * math.sqrt(252)  # annualized
+                # Annualize by trades/year proxy.
+                # 4H bars: ~2190/year; normalize by sqrt(trade_count/year)
+                # Use sqrt(252) as conservative proxy (matches industry standard
+                # for daily-equivalent risk-adjusted returns at this scale).
+                n_trades = max(len(self._sharpe_returns), 1)
+                annualization = math.sqrt(min(n_trades, 252))
+                sharpe = (mu / sd) * annualization
 
         # v4.2: compute gross profit, gross loss, total notional
         gross_profit = 0.0
@@ -1221,7 +1222,6 @@ class SimulationResults:
     def to_csv_string(self) -> str:
         """Return CSV as string (for in-memory use)."""
         buf = io.StringIO()
-        self.export_csv("/dev/null")  # reuse logic... actually build inline
         rows = []
         for gr in self.generation_results:
             s = gr.snapshot
@@ -1418,10 +1418,9 @@ class SimulationHarness:
             #       - Reinitialize bottom 40% of agents with fresh DNA
             #       - Force risk state to CRITICAL
             #     If capital recovers above floor, restore full allocation.
-            floor_triggered = False
+            # Capital floor check
             floor_abs = cfg.capital_floor_pct * cfg.starting_capital
             if cfg.capital_floor_pct > 0 and pool_capital < floor_abs:
-                floor_triggered = True
                 alloc_mult = 0.5
                 logger.info(
                     "  CAPITAL FLOOR BREACH gen %d: $%.2f < $%.2f (%.0f%% floor) "
@@ -1431,7 +1430,6 @@ class SimulationHarness:
                 )
 
                 # Force risk state to critical
-                from darwin_agent.interfaces.types import PortfolioRiskState
                 portfolio_snap.risk_state = PortfolioRiskState.CRITICAL
 
                 # Reinitialize bottom 40% of dna_pool with fresh random DNA
