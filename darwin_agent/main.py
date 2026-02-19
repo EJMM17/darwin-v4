@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -40,7 +41,8 @@ def setup_logging() -> logging.Logger:
     return logger
 
 
-def _create_runtime(logger: logging.Logger) -> tuple[RuntimeService, BinanceFuturesClient, TelegramNotifier, DarwinCoreEngine]:
+def _create_clients(logger: logging.Logger) -> tuple[BinanceFuturesClient, TelegramNotifier]:
+    """Create exchange and notification clients from credentials."""
     creds = load_runtime_credentials(logger)
     binance = BinanceFuturesClient(
         BinanceCredentials(
@@ -52,6 +54,12 @@ def _create_runtime(logger: logging.Logger) -> tuple[RuntimeService, BinanceFutu
         bot_token=creds.telegram_bot_token,
         chat_id=creds.telegram_chat_id,
     )
+    return binance, telegram
+
+
+def _create_runtime(logger: logging.Logger) -> tuple[RuntimeService, BinanceFuturesClient, TelegramNotifier, DarwinCoreEngine]:
+    """Create v4 runtime (preserved for backward compatibility)."""
+    binance, telegram = _create_clients(logger)
     engine = DarwinCoreEngine(EngineConfig(risk_percent=1.0, leverage=5))
     runtime = RuntimeService(
         engine=engine,
@@ -224,13 +232,107 @@ async def run_live(logger: logging.Logger) -> int:
         telegram.close()
 
 
+# ═════════════════════════════════════════════════════════════
+# v5 Engine Entry Points
+# ═════════════════════════════════════════════════════════════
+
+async def run_v5(logger: logging.Logger, dry_run: bool = False) -> int:
+    """Run the Darwin v5 engine."""
+    from darwin_agent.v5.engine import DarwinV5Engine, V5EngineConfig
+
+    try:
+        binance, telegram = _create_clients(logger)
+    except CredentialsError as exc:
+        logger.error("credentials error: %s", exc)
+        return 1
+
+    symbols = os.getenv("DARWIN_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")
+    symbols = [s.strip() for s in symbols if s.strip()]
+
+    config = V5EngineConfig(
+        symbols=symbols,
+        leverage=int(os.getenv("DARWIN_LEVERAGE", "5")),
+        base_risk_pct=float(os.getenv("DARWIN_RISK_PERCENT", "1.0")),
+        confidence_threshold=float(os.getenv("DARWIN_CONFIDENCE_THRESHOLD", "0.60")),
+        dry_run=dry_run,
+    )
+
+    v5_engine = DarwinV5Engine(binance, telegram, config)
+
+    stop_event = asyncio.Event()
+
+    def _request_shutdown(signum: int, _frame: Any) -> None:
+        logger.info("signal received: %s", signum)
+        v5_engine.stop()
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
+
+    try:
+        startup = await v5_engine.initialize()
+        logger.info("=== DARWIN v5 STARTUP SUMMARY ===")
+        logger.info("Equity: $%.4f", startup["equity"])
+        logger.info("Positions: %d", startup["open_positions"])
+        logger.info("Symbols: %s", startup["symbols"])
+        logger.info("Leverage: %dx", config.leverage)
+        logger.info("Dry run: %s", dry_run)
+        logger.info("=================================")
+    except Exception as exc:
+        logger.error("v5 initialization failed: %s", exc, exc_info=True)
+        try:
+            telegram.notify_error(f"v5 startup failure: {exc}")
+        except Exception:
+            pass
+        binance.close()
+        telegram.close()
+        return 1
+
+    engine_task = asyncio.create_task(v5_engine.run_forever())
+    wait_task = asyncio.create_task(stop_event.wait())
+
+    try:
+        done, _ = await asyncio.wait({engine_task, wait_task}, return_when=asyncio.FIRST_COMPLETED)
+        if engine_task in done:
+            return engine_task.result()
+        v5_engine.stop()
+        engine_task.cancel()
+        try:
+            await engine_task
+        except asyncio.CancelledError:
+            pass
+        return 0
+    finally:
+        wait_task.cancel()
+        binance.close()
+        telegram.close()
+
+
+async def run_v5_dry_run(logger: logging.Logger) -> int:
+    """Run v5 engine in dry-run mode (signals only, no orders)."""
+    return await run_v5(logger, dry_run=True)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Darwin v4 headless runtime")
+    parser = argparse.ArgumentParser(description="Darwin v5 headless runtime")
     parser.add_argument("--test", action="store_true", help="Run startup validations and exit")
+    parser.add_argument("--v5", action="store_true", help="Run the v5 engine (default)")
+    parser.add_argument("--v4", action="store_true", help="Run the legacy v4 engine")
+    parser.add_argument("--dry-run", action="store_true", help="v5 dry-run: signals only, no orders")
     args = parser.parse_args()
 
     logger = setup_logging()
-    code = asyncio.run(run_test_mode(logger) if args.test else run_live(logger))
+
+    if args.test:
+        code = asyncio.run(run_test_mode(logger))
+    elif args.v4:
+        code = asyncio.run(run_live(logger))
+    elif args.dry_run:
+        code = asyncio.run(run_v5_dry_run(logger))
+    else:
+        # Default: v5 engine
+        code = asyncio.run(run_v5(logger))
+
     raise SystemExit(code)
 
 
