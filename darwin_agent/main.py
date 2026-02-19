@@ -250,11 +250,12 @@ async def run_v5(logger: logging.Logger, dry_run: bool = False) -> int:
 
     config = V5EngineConfig(
         symbols=symbols,
-        leverage=int(os.getenv("DARWIN_LEVERAGE", "5")),
-        base_risk_pct=float(os.getenv("DARWIN_RISK_PERCENT", "1.0")),
+        leverage=int(os.getenv("DARWIN_LEVERAGE", "10")),
+        base_risk_pct=float(os.getenv("DARWIN_RISK_PERCENT", "2.0")),
         confidence_threshold=float(os.getenv("DARWIN_CONFIDENCE_THRESHOLD", "0.60")),
         stop_loss_pct=float(os.getenv("DARWIN_STOP_LOSS_PCT", "1.5")),
         take_profit_pct=float(os.getenv("DARWIN_TAKE_PROFIT_PCT", "3.0")),
+        tick_interval_s=float(os.getenv("DARWIN_TICK_INTERVAL", "5.0")),
         dry_run=dry_run,
     )
 
@@ -331,7 +332,7 @@ def main() -> None:
     elif args.dry_run:
         code = asyncio.run(run_v5_dry_run(logger))
     else:
-        # Default: v5 engine
+        # Default and explicit --v5: run v5 engine
         code = asyncio.run(run_v5(logger))
 
     raise SystemExit(code)

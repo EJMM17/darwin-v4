@@ -72,6 +72,30 @@ class BinanceFuturesClient:
         return int(payload.get("leverage", 0)) == leverage
 
 
+
+    def get_current_price(self, symbol: str) -> float:
+        """Fetch current mark price for a symbol (single lightweight call)."""
+        try:
+            response = self._session.get(
+                f"{self._base_url}/fapi/v1/ticker/price",
+                params={"symbol": symbol},
+                timeout=self._timeout_s,
+            )
+            response.raise_for_status()
+            return float(response.json().get("price", 0.0))
+        except Exception:
+            return 0.0
+
+    def get_account_snapshot(self) -> tuple[float, float]:
+        """
+        Return (wallet_balance, unrealized_pnl) in a single API call.
+        Avoids calling /fapi/v2/account twice per tick.
+        """
+        payload = self._signed_request("GET", "/fapi/v2/account")
+        wallet = float(payload.get("totalWalletBalance", 0.0))
+        upnl = float(payload.get("totalUnrealizedProfit", 0.0))
+        return wallet, upnl
+
     def get_exchange_info(self) -> dict[str, Any]:
         """Fetch exchange info including symbol step sizes."""
         response = self._session.get(

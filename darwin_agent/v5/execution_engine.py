@@ -292,11 +292,16 @@ class ExecutionEngine:
 
     def _place_on_exchange(self, order: OrderRequest) -> ExecutionResult:
         """Place the order on the exchange (blocking)."""
+        # Format quantity with correct precision based on step size
+        step = self._get_step_size(order.symbol)
+        precision = max(0, round(-math.log10(step))) if step > 0 else 3
+        quantity_str = f"{order.quantity:.{precision}f}"
+
         params: Dict[str, Any] = {
             "symbol": order.symbol,
             "side": order.side,
             "type": order.order_type,
-            "quantity": str(order.quantity),
+            "quantity": quantity_str,
         }
 
         if order.reduce_only:

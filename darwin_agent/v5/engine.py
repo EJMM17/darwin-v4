@@ -164,9 +164,8 @@ class DarwinV5Engine:
             raise RuntimeError("Failed to connect to exchange")
         logger.info("exchange connected")
 
-        # 3. Fetch wallet state
-        wallet = await asyncio.to_thread(self._binance.get_wallet_balance)
-        upnl = await asyncio.to_thread(self._binance.get_unrealized_pnl)
+        # 3. Fetch wallet state (single API call)
+        wallet, upnl = await asyncio.to_thread(self._binance.get_account_snapshot)
         positions = await asyncio.to_thread(self._binance.get_open_positions)
 
         self._state.wallet_balance = float(wallet)
@@ -294,9 +293,8 @@ class DarwinV5Engine:
         self._state.tick_count += 1
         tick = self._state.tick_count
 
-        # 1. Fetch current portfolio state
-        wallet = await asyncio.to_thread(self._binance.get_wallet_balance)
-        upnl = await asyncio.to_thread(self._binance.get_unrealized_pnl)
+        # 1. Fetch current portfolio state (single API call for wallet+upnl)
+        wallet, upnl = await asyncio.to_thread(self._binance.get_account_snapshot)
         positions = await asyncio.to_thread(self._binance.get_open_positions)
 
         self._state.wallet_balance = float(wallet)
@@ -326,7 +324,7 @@ class DarwinV5Engine:
         for symbol in self._config.symbols:
             await self._process_symbol(symbol, btc_features)
 
-        # 3. Heartbeat logging
+        # 4. Heartbeat logging
         if tick - self._state.last_heartbeat_tick >= self._config.heartbeat_interval_ticks:
             self._state.last_heartbeat_tick = tick
             self._telemetry.log_heartbeat(
@@ -338,7 +336,7 @@ class DarwinV5Engine:
                 drawdown_pct=self._state.drawdown_pct,
             )
 
-        # 4. Periodic Monte Carlo validation
+        # 5. Periodic Monte Carlo validation
         if (
             tick % self._config.monte_carlo_interval_ticks == 0
             and len(self._state.trade_pnls) >= 10
@@ -385,12 +383,11 @@ class DarwinV5Engine:
             if entry_price <= 0:
                 continue
 
-            # Get current price
+            # Get current price (lightweight single-field call)
             try:
-                features = await asyncio.to_thread(
-                    self._market_data.compute_features, symbol
+                current_price = await asyncio.to_thread(
+                    self._binance.get_current_price, symbol
                 )
-                current_price = features.close
             except Exception:
                 continue
 
@@ -423,8 +420,7 @@ class DarwinV5Engine:
                 close_side, symbol, close_qty, close_reason, entry_price, current_price,
             )
 
-            from darwin_agent.v5.execution_engine import OrderRequest as V5CloseRequest
-            close_order = V5CloseRequest(
+            close_order = V5OrderRequest(
                 symbol=symbol,
                 side=close_side,
                 quantity=close_qty,
