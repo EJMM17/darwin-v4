@@ -331,6 +331,11 @@ class ExecutionEngine:
         if avg_price == 0 and filled_qty > 0:
             avg_price = float(data.get("price", order.price))
 
+        error_msg = ""
+        if filled_qty == 0:
+            status = data.get("status", "UNKNOWN")
+            error_msg = f"zero_fill: status={status} orderId={data.get('orderId', '?')}"
+
         return ExecutionResult(
             success=filled_qty > 0,
             order_id=str(data.get("orderId", "")),
@@ -339,6 +344,7 @@ class ExecutionEngine:
             filled_qty=filled_qty,
             avg_price=avg_price,
             fee=0.0,  # Binance includes fee in separate endpoint
+            error=error_msg,
         )
 
     def _get_step_size(self, symbol: str) -> float:

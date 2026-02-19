@@ -64,12 +64,18 @@ class BinanceFuturesClient:
         return float(payload.get("totalUnrealizedProfit", 0.0))
 
     def set_leverage(self, symbol: str, leverage: int) -> bool:
-        payload = self._signed_request(
-            "POST",
-            "/fapi/v1/leverage",
-            params={"symbol": symbol, "leverage": leverage},
-        )
-        return int(payload.get("leverage", 0)) == leverage
+        try:
+            payload = self._signed_request(
+                "POST",
+                "/fapi/v1/leverage",
+                params={"symbol": symbol, "leverage": leverage},
+            )
+            return int(payload.get("leverage", 0)) == leverage
+        except Exception as exc:
+            # Binance code -4046: "No need to change leverage." — already set correctly
+            if "-4046" in str(exc) or "No need to change leverage" in str(exc):
+                return True
+            raise
 
 
 

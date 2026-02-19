@@ -19,19 +19,12 @@ services:
     build: .
     container_name: darwin-agent
     restart: unless-stopped
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
     volumes:
       - darwin-data:/app/data
       - darwin-logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
       - TZ=UTC
-      - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql://darwin:darwin@postgres:5432/darwin
       # ── Binance API Keys ──────────────────────────────────
       - BINANCE_API_KEY=${BINANCE_API_KEY}
       - BINANCE_API_SECRET=${BINANCE_API_SECRET}
