@@ -243,7 +243,7 @@ def load_config(path: str | None = None) -> DarwinConfig:
                 testnet=_env_bool("DARWIN_TESTNET", bool(ex.get("testnet", False))),
                 futures_type=os.getenv("DARWIN_FUTURES_TYPE", ex.get("futures_type", "USDT-M")),
                 enabled=ex.get("enabled", True),
-                leverage=max(1, min(5, _env_int("DARWIN_LEVERAGE", int(ex.get("leverage", 5))))),
+                leverage=max(1, min(20, _env_int("DARWIN_LEVERAGE", int(ex.get("leverage", 5))))),
                 symbols=ex.get("symbols", ["BTCUSDT", "ETHUSDT", "SOLUSDT"]),
             )
             config.exchanges.append(exc)
@@ -255,7 +255,7 @@ def load_config(path: str | None = None) -> DarwinConfig:
         config.exchanges[0].futures_type = os.getenv("DARWIN_FUTURES_TYPE", config.exchanges[0].futures_type)
         config.exchanges[0].api_key = os.getenv(f"{default_exchange.upper()}_API_KEY", "")
         config.exchanges[0].api_secret = os.getenv(f"{default_exchange.upper()}_API_SECRET", "")
-        config.exchanges[0].leverage = max(1, min(5, _env_int("DARWIN_LEVERAGE", config.exchanges[0].leverage)))
+        config.exchanges[0].leverage = max(1, min(20, _env_int("DARWIN_LEVERAGE", config.exchanges[0].leverage)))
 
     config.mode = os.getenv("DARWIN_MODE", raw.get("mode", "live"))
 

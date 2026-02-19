@@ -28,7 +28,7 @@ class SizerConfig:
     leverage: int = 5                    # max leverage
     # Volatility scaling
     target_vol: float = 0.02            # target annualized vol (2%)
-    vol_scale_min: float = 0.3          # minimum vol scaling factor
+    vol_scale_min: float = 0.5          # minimum vol scaling factor (floor para capital pequeño)
     vol_scale_max: float = 1.5          # maximum vol scaling factor
     # Drawdown adaptive
     dd_threshold_pct: float = 5.0       # start reducing at 5% drawdown
@@ -42,7 +42,7 @@ class SizerConfig:
     # Total portfolio exposure
     max_total_exposure_mult: float = 5.0  # max 5x leverage total
     # Min notional
-    min_notional_usdt: float = 5.0
+    min_notional_usdt: float = 5.5      # Binance min es $5, +$0.5 de margen por slippage
 
 
 @dataclass(slots=True)

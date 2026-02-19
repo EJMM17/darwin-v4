@@ -71,6 +71,41 @@ class BinanceFuturesClient:
         )
         return int(payload.get("leverage", 0)) == leverage
 
+
+    def get_exchange_info(self) -> dict[str, Any]:
+        """Fetch exchange info including symbol step sizes."""
+        response = self._session.get(
+            f"{self._base_url}/fapi/v1/exchangeInfo",
+            timeout=self._timeout_s,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def get_symbol_step_sizes(self, symbols: list[str]) -> dict[str, float]:
+        """
+        Return {symbol: step_size} for given symbols.
+        Falls back to 0.001 if not found.
+        """
+        try:
+            info = self.get_exchange_info()
+            result: dict[str, float] = {}
+            for sym_info in info.get("symbols", []):
+                sym = sym_info.get("symbol", "")
+                if sym not in symbols:
+                    continue
+                for f in sym_info.get("filters", []):
+                    if f.get("filterType") == "LOT_SIZE":
+                        step = float(f.get("stepSize", 0.001))
+                        result[sym] = step
+                        break
+            # Fill missing with default
+            for s in symbols:
+                if s not in result:
+                    result[s] = 0.001
+            return result
+        except Exception:
+            return {s: 0.001 for s in symbols}
+
     def validate_startup(self, symbols: list[str], leverage: int) -> dict[str, Any]:
         self.ping_futures()
         wallet = self.get_wallet_balance()

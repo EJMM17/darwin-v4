@@ -350,6 +350,12 @@ class ExecutionEngine:
         # Round quantity to the step's precision without float drift
         return math.floor(quantity / step) * step
 
+    def load_symbol_info(self, step_sizes: Dict[str, float]) -> None:
+        """Load symbol step sizes fetched from exchange info."""
+        for symbol, step in step_sizes.items():
+            self._symbol_info[symbol] = {"step_size": step}
+        logger.info("loaded step sizes for %d symbols", len(step_sizes))
+
     def get_metrics(self) -> Dict[str, Any]:
         """Return execution metrics."""
         return {

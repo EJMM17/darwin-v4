@@ -187,7 +187,17 @@ class DarwinV5Engine:
             except Exception as exc:
                 raise RuntimeError(f"Failed to set leverage on {symbol}: {exc}") from exc
 
-        # 5. Initialize position sizer daily tracking
+        # 5. Load symbol step sizes from Binance exchange info
+        try:
+            step_sizes = await asyncio.to_thread(
+                self._binance.get_symbol_step_sizes, self._config.symbols
+            )
+            self._execution_engine.load_symbol_info(step_sizes)
+            logger.info("symbol step sizes loaded: %s", step_sizes)
+        except Exception as exc:
+            logger.warning("could not load symbol step sizes, using defaults: %s", exc)
+
+        # 6. Initialize position sizer daily tracking
         self._position_sizer.reset_daily(self._state.equity)
 
         startup = {
