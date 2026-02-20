@@ -528,3 +528,81 @@ def _ols_simple(x: List[float], y: List[float]) -> tuple:
     beta = cov / var
     alpha = y_mean - beta * x_mean
     return beta, alpha
+
+
+def compute_range_context(
+    closes: List[float],
+    highs: List[float],
+    lows: List[float],
+    window: int = 48,
+) -> dict:
+    """
+    Detecta el rango de mercado (soporte/resistencia) para estrategias
+    de mean-reversion en mercados laterales.
+
+    Calcula:
+      - range_high: resistencia (max de highs en la ventana)
+      - range_low:  soporte (min de lows en la ventana)
+      - range_pct:  amplitud del rango como % del precio
+      - price_position: 0.0 = en soporte, 1.0 = en resistencia
+      - near_support: True si precio está en el 20% inferior del rango
+      - near_resistance: True si precio está en el 20% superior del rango
+      - is_ranging: True si el rango es comprimido (ADX bajo implícito)
+
+    Uso: Solo abrir longs cerca de soporte, cortos cerca de resistencia.
+    """
+    n = min(len(closes), min(len(highs), len(lows)))
+    if n < 10:
+        return {
+            "range_high": closes[-1] if closes else 0,
+            "range_low": closes[-1] if closes else 0,
+            "range_pct": 0.0,
+            "price_position": 0.5,
+            "near_support": False,
+            "near_resistance": False,
+            "is_ranging": False,
+        }
+
+    w = min(window, n)
+    h_window = highs[-w:]
+    l_window = lows[-w:]
+    c_window = closes[-w:]
+
+    range_high = max(h_window)
+    range_low  = min(l_window)
+    current    = closes[-1]
+
+    if range_low <= 0 or range_high <= range_low:
+        return {
+            "range_high": range_high,
+            "range_low": range_low,
+            "range_pct": 0.0,
+            "price_position": 0.5,
+            "near_support": False,
+            "near_resistance": False,
+            "is_ranging": False,
+        }
+
+    range_pct = (range_high - range_low) / range_low
+
+    # Posición del precio dentro del rango (0=soporte, 1=resistencia)
+    price_position = (current - range_low) / (range_high - range_low)
+
+    # Zona exterior = 20% desde los extremos
+    EDGE_ZONE = 0.20
+    near_support    = price_position <= EDGE_ZONE
+    near_resistance = price_position >= (1.0 - EDGE_ZONE)
+
+    # Mercado en rango si la amplitud es pequeña (< 5% en 48h)
+    # En tendencia el rango suele ser 8-15%+
+    is_ranging = range_pct < 0.05
+
+    return {
+        "range_high": range_high,
+        "range_low": range_low,
+        "range_pct": range_pct,
+        "price_position": price_position,
+        "near_support": near_support,
+        "near_resistance": near_resistance,
+        "is_ranging": is_ranging,
+    }

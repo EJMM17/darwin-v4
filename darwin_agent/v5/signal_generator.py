@@ -428,17 +428,22 @@ class SignalGenerator:
             w["momentum"] *= 1.5
             w["mean_reversion"] *= 0.5
         elif regime.regime == Regime.RANGE_BOUND:
-            # Boost MR, reduce momentum
-            w["momentum"] *= 0.5
-            w["mean_reversion"] *= 1.5
+            # En lateral: MR es la estrategia correcta. Momentum en lateral = ruido.
+            # Pesos: MR domina (0.70), momentum mínimo (0.15), resto distribuido.
+            # Esto es ~3x más peso en MR que en tendencia.
+            w["momentum"] *= 0.3           # reducir agresivamente
+            w["mean_reversion"] *= 2.5     # amplificar MR como primaria
+            w["residual_alpha"] *= 0.8     # mantener ligeramente
+            w["funding_carry"] *= 1.2      # funding más útil en rango
         elif regime.regime == Regime.HIGH_VOL:
             # Boost funding carry (extremes more predictive in high vol)
             w["funding_carry"] *= 1.5
             w["momentum"] *= 0.8
         elif regime.regime == Regime.LOW_VOL:
-            # Boost mean reversion
-            w["mean_reversion"] *= 1.3
-            w["momentum"] *= 0.7
+            # Low vol: similar a RANGE_BOUND, MR más relevante
+            w["mean_reversion"] *= 1.8
+            w["momentum"] *= 0.5
+            w["funding_carry"] *= 1.3
 
         # Renormalize
         total = sum(w.values())

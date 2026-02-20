@@ -97,6 +97,8 @@ class V5EngineState:
     cooldown_until: dict = field(default_factory=dict)
     # Trailing stop tracking: symbol -> peak_pnl_pct seen so far
     trailing_peaks: dict = field(default_factory=dict)
+    # Frequency throttle en lateral: symbol -> tick del último trade abierto
+    last_trade_tick: dict = field(default_factory=dict)
     # Kill switch state
     trading_halted: bool = False
     halt_reason: str = ""
@@ -611,9 +613,10 @@ class DarwinV5Engine:
                 else (entry_price - current_price) / entry_price
             )
 
-            # ── Layer 1: Dynamic SL (ATR-based floor) ─────────────────────
+            # ── Layer 1: Dynamic SL/TP (ATR-based + regime-adaptive) ───────
             # Fetch ATR for this symbol from cached features (non-blocking)
             atr_pct = 0.0
+            pos_regime = "trending"
             try:
                 feats = self._market_data.compute_features(symbol)
                 if feats.atr_14 > 0 and feats.close > 0:
@@ -621,12 +624,22 @@ class DarwinV5Engine:
             except Exception:
                 pass  # fallback to fixed SL
 
-            # Effective SL = max(config floor, ATR multiple)
-            sl_pct = max(
-                cfg.stop_loss_pct / 100.0,
-                cfg.atr_sl_multiplier * atr_pct,
-            )
-            tp_pct = cfg.take_profit_pct / 100.0
+            # Detectar régimen de la posición para SL/TP adaptativos
+            # (usamos el régimen actual del engine)
+            current_regime_val = self._state.current_regime
+            is_ranging_pos = current_regime_val in ("range_bound", "low_vol")
+
+            if is_ranging_pos:
+                # En lateral: SL/TP más ajustados para capturar moves pequeños
+                # Ratio 1.5:1 (vs 2:1 en tendencia) — adecuado para rango
+                sl_floor = cfg.sl_pct_ranging / 100.0
+                tp_pct   = cfg.tp_pct_ranging / 100.0
+            else:
+                sl_floor = cfg.sl_pct_trending / 100.0
+                tp_pct   = cfg.tp_pct_trending / 100.0
+
+            # Effective SL = max(config floor por régimen, ATR multiple)
+            sl_pct = max(sl_floor, cfg.atr_sl_multiplier * atr_pct)
 
             # ── Layer 2: Trailing stop ─────────────────────────────────────
             trail_sl = None
@@ -809,6 +822,85 @@ class DarwinV5Engine:
             remaining = cooldown_until - self._state.tick_count
             logger.debug("%s in cooldown — %d ticks remaining", symbol, remaining)
             return
+
+        # 6b. Regime-adaptive guards — crítico para mercados laterales
+        cfg = self._config
+        is_ranging = regime.regime.value in ("range_bound", "low_vol")
+
+        # GAP 6: ATR mínimo filter — no operar si el mercado está demasiado quieto
+        # Si ATR < min_atr_pct, las fees (0.1% round-trip) se comen el profit
+        if features.atr_14 > 0 and features.close > 0:
+            atr_pct = features.atr_14 / features.close * 100.0
+            min_atr = cfg.min_atr_pct_to_trade
+            if atr_pct < min_atr:
+                logger.debug(
+                    "%s ATR_filter: atr=%.3f%% < min=%.3f%% (mercado demasiado quieto)",
+                    symbol, atr_pct, min_atr,
+                )
+                return
+
+        # GAP 1: Confidence threshold más alto en mercado lateral
+        effective_threshold = (
+            cfg.confidence_threshold_ranging if is_ranging
+            else cfg.confidence_threshold_trending
+        )
+        if signal.confidence < effective_threshold:
+            logger.debug(
+                "%s confidence_filter: %.3f < %.3f (regime=%s)",
+                symbol, signal.confidence, effective_threshold, regime.regime.value,
+            )
+            return
+
+        # GAP 2: Frequency throttle en lateral
+        # Solo 1 trade por símbolo cada N ticks para no desperdiciar fees en ruido
+        if is_ranging:
+            last_tick = self._state.last_trade_tick.get(symbol, 0)
+            ticks_since_last = self._state.tick_count - last_tick
+            if ticks_since_last < cfg.ranging_trade_cooldown_ticks:
+                logger.debug(
+                    "%s ranging_throttle: %d/%d ticks",
+                    symbol, ticks_since_last, cfg.ranging_trade_cooldown_ticks,
+                )
+                return
+
+        # GAP 4: Range context — solo operar en extremos del rango en lateral
+        if is_ranging and len(features.closes) >= 10:
+            from darwin_agent.v5.market_data import compute_range_context
+            rctx = compute_range_context(
+                features.closes, features.highs, features.lows, window=48
+            )
+            if rctx["range_pct"] < 0.02:
+                # Rango demasiado estrecho (< 2%) — no hay espacio para el trade
+                logger.debug(
+                    "%s range_filter: range_pct=%.2f%% muy comprimido",
+                    symbol, rctx["range_pct"] * 100,
+                )
+                return
+
+            # Si el precio no está cerca de los extremos del rango → skip
+            # (no entramos en el medio del rango)
+            if not rctx["near_support"] and not rctx["near_resistance"]:
+                logger.debug(
+                    "%s range_filter: price_pos=%.2f (no en extremo del rango)",
+                    symbol, rctx["price_position"],
+                )
+                return
+
+            # Filtro de dirección: solo long en soporte, solo short en resistencia
+            if rctx["near_support"] and signal.direction == "SHORT":
+                logger.debug(
+                    "%s range_dir_filter: en soporte pero señal SHORT — inverting to LONG",
+                    symbol,
+                )
+                # En lateral: cerca del soporte = comprar, no vender
+                # Rechazar señal corta en soporte (probable rebote al alza)
+                return
+            if rctx["near_resistance"] and signal.direction == "LONG":
+                logger.debug(
+                    "%s range_dir_filter: en resistencia pero señal LONG — corto más probable",
+                    symbol,
+                )
+                return
 
         # 7. Position sizing — with Half-Kelly + Portfolio Risk checks
 
