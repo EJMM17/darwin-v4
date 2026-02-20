@@ -53,7 +53,9 @@ class FeatureSet:
     # Mean reversion
     z_score_20: float = 0.0
     z_score_50: float = 0.0
+    z_score_ou: float = 0.0        # z-score computed with OU-calibrated window
     distance_from_mean_20: float = 0.0
+    ou_half_life: float = 20.0     # Ornstein-Uhlenbeck half-life in bars
     # Trend strength
     adx_14: float = 0.0
     # Returns
@@ -206,12 +208,20 @@ class MarketDataLayer:
         roc_50 = _roc(closes, 50)
         roc_100 = _roc(closes, min(100, len(closes) - 1))
 
-        # Z-scores
+        # Z-scores (fixed windows)
         z_20 = _z_score(closes, 20)
         z_50 = _z_score(closes, 50)
 
         # Distance from mean
         dist_20 = _distance_from_mean(closes, 20)
+
+        # OU half-life calibration (Kakushadze & Serur §9 Ornstein-Uhlenbeck)
+        # half_life = ln(2) / kappa, where kappa is fitted from price residuals.
+        # This gives the dynamic window that best captures mean-reversion in the
+        # current market conditions, instead of a fixed 20 or 50-bar window.
+        ou_hl = _ou_half_life(closes, max_window=100)
+        ou_window = max(5, min(100, int(round(ou_hl))))
+        z_ou = _z_score(closes, ou_window)
 
         return FeatureSet(
             symbol=symbol,
@@ -227,7 +237,9 @@ class MarketDataLayer:
             roc_100=roc_100,
             z_score_20=z_20,
             z_score_50=z_50,
+            z_score_ou=z_ou,
             distance_from_mean_20=dist_20,
+            ou_half_life=ou_hl,
             adx_14=adx_14[-1] if adx_14 else 0.0,
             returns=returns,
             closes=closes,
@@ -390,10 +402,44 @@ def _realized_vol(returns: List[float], period: int) -> float:
 
 
 def _roc(closes: List[float], period: int) -> float:
-    """Rate of change over period."""
+    """
+    Normalized rate of change over period.
+
+    Kakushadze & Serur §18.2 eq.524: R̂(t) = [R(t) - R̄(t,T)] / σ(t,T)
+
+    Normalizes the current bar return by the mean and std of bar returns
+    over the lookback window, making momentum scale-invariant across
+    volatility regimes. A 2%% move in a low-vol regime and a 2%% move in
+    a high-vol regime now carry different weights, preventing false signals
+    when the market transitions between regimes.
+    """
     if len(closes) <= period or closes[-period - 1] == 0:
         return 0.0
-    return (closes[-1] - closes[-period - 1]) / closes[-period - 1]
+
+    # Compute rolling single-bar returns over the window for normalization
+    window = closes[-(period + 1):]  # period+1 prices -> period returns
+    if len(window) < 3:
+        # fallback: raw return
+        return (closes[-1] - closes[-period - 1]) / closes[-period - 1]
+
+    bar_returns = [
+        (window[i] - window[i - 1]) / window[i - 1]
+        for i in range(1, len(window))
+        if window[i - 1] != 0
+    ]
+    if len(bar_returns) < 2:
+        return (closes[-1] - closes[-period - 1]) / closes[-period - 1]
+
+    mu = sum(bar_returns) / len(bar_returns)
+    variance = sum((r - mu) ** 2 for r in bar_returns) / len(bar_returns)
+    sigma = variance ** 0.5
+
+    if sigma < 1e-10:
+        return 0.0  # flat market, no meaningful signal
+
+    # Normalize the most recent bar return vs the period distribution
+    current_bar = (closes[-1] - closes[-2]) / closes[-2] if closes[-2] != 0 else 0.0
+    return (current_bar - mu) / sigma
 
 
 def _z_score(closes: List[float], period: int) -> float:
@@ -418,3 +464,67 @@ def _distance_from_mean(closes: List[float], period: int) -> float:
     if mu == 0:
         return 0.0
     return (closes[-1] - mu) / mu
+
+def _ou_half_life(closes: List[float], max_window: int = 100) -> float:
+    """
+    Estimate the Ornstein-Uhlenbeck half-life of mean reversion.
+
+    Kakushadze & Serur §9: dX(t) = κ[a - X(t)]dt + σdW(t)
+    The half-life = ln(2) / κ tells us how long it takes for a deviation
+    from the mean to decay by half. This is the optimal lookback window
+    for mean-reversion strategies.
+
+    Method: OLS regression of ΔX(t) on X(t-1) (Dickey-Fuller style)
+        ΔX(t) = α + β·X(t-1) + ε
+        κ ≈ -β  (if β < 0, the process is mean-reverting)
+        half_life = ln(2) / κ
+
+    Returns half_life in bars. Falls back to 20 if regression fails or
+    if the series is not mean-reverting (β >= 0).
+    """
+    import math as _math
+    n = min(len(closes), max_window)
+    if n < 20:
+        return 20.0
+
+    window = closes[-n:]
+
+    # ΔX(t) = X(t) - X(t-1), X_lag = X(t-1)
+    x_lag = window[:-1]
+    delta_x = [window[i] - window[i - 1] for i in range(1, len(window))]
+
+    if len(x_lag) < 10:
+        return 20.0
+
+    # OLS: delta_x = alpha + beta * x_lag
+    beta, _ = _ols_simple(x_lag, delta_x)
+
+    # beta should be negative for mean-reversion; kappa = -beta
+    if beta >= 0:
+        # Not mean-reverting in this window; return sensible default
+        return 20.0
+
+    kappa = -beta
+    if kappa < 1e-6:
+        return 100.0  # extremely slow reversion
+
+    half_life = _math.log(2.0) / kappa
+
+    # Clamp to [3, max_window] bars
+    return max(3.0, min(float(max_window), half_life))
+
+
+def _ols_simple(x: List[float], y: List[float]) -> tuple:
+    """OLS regression y = alpha + beta * x. Returns (beta, alpha)."""
+    n = len(x)
+    if n < 2:
+        return 0.0, 0.0
+    x_mean = sum(x) / n
+    y_mean = sum(y) / n
+    cov = sum((x[i] - x_mean) * (y[i] - y_mean) for i in range(n)) / n
+    var = sum((xi - x_mean) ** 2 for xi in x) / n
+    if var < 1e-20:
+        return 0.0, y_mean
+    beta = cov / var
+    alpha = y_mean - beta * x_mean
+    return beta, alpha

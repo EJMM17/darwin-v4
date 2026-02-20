@@ -138,7 +138,7 @@ class SignalGenerator:
         symbol = features.symbol
 
         # Compute individual factors
-        momentum = self._compute_momentum(features)
+        momentum = self._compute_momentum(features, btc_features)
         mean_rev = self._compute_mean_reversion(features)
         residual = self._compute_residual_alpha(features, btc_features)
         funding = self._compute_funding_carry(funding_rate)
@@ -264,11 +264,18 @@ class SignalGenerator:
 
         return signal
 
-    def _compute_momentum(self, features: Any) -> float:
+    def _compute_momentum(self, features: Any, btc_features: Any = None) -> float:
         """
-        Momentum factor: standardized returns over multiple lookback periods.
+        Momentum factor: normalized returns demeaned vs BTC market proxy.
 
-        Positive = bullish momentum, negative = bearish.
+        Two improvements from Kakushadze & Serur:
+        1. §18.2 eq.524: ROC is already vol-normalized in market_data._roc()
+        2. §10.4 eq.477: R̃ᵢ = Rᵢ - Rₘ (demean vs BTC/market)
+
+        Demeaning removes the common market factor so the signal captures
+        the symbol-specific momentum, not just "the whole market is up."
+        Without demeaning, when BTC pumps 5%%, every symbol looks like it
+        has strong momentum — but that's not an alpha, it's beta.
         """
         rocs = []
         if features.roc_20 != 0:
@@ -281,8 +288,28 @@ class SignalGenerator:
         if not rocs:
             return 0.0
 
-        # Average of standardized ROCs across timeframes
-        return sum(rocs) / len(rocs)
+        symbol_momentum = sum(rocs) / len(rocs)
+
+        # Demean vs BTC (market proxy) — §10.4 eq.477
+        # Only applies when the symbol is NOT BTC and BTC features are available
+        if (
+            btc_features is not None
+            and features.symbol != "BTCUSDT"
+            and getattr(btc_features, "roc_20", 0) != 0
+        ):
+            btc_rocs = []
+            if btc_features.roc_20 != 0:
+                btc_rocs.append(btc_features.roc_20)
+            if btc_features.roc_50 != 0:
+                btc_rocs.append(btc_features.roc_50)
+            if btc_features.roc_100 != 0:
+                btc_rocs.append(btc_features.roc_100)
+            if btc_rocs:
+                btc_momentum = sum(btc_rocs) / len(btc_rocs)
+                # Residual momentum: symbol outperforming/underperforming market
+                symbol_momentum = symbol_momentum - btc_momentum
+
+        return symbol_momentum
 
     def _compute_mean_reversion(self, features: Any) -> float:
         """
@@ -299,8 +326,25 @@ class SignalGenerator:
         z_50 = features.z_score_50
         dist = features.distance_from_mean_20
 
-        # Base MR score (invert: extreme low = high long signal)
-        mr_score = -(0.4 * z_20 + 0.3 * z_50 + 0.3 * dist * 10.0)
+        # Use OU-calibrated z-score if available (Kakushadze §9 OU process)
+        # This replaces the fixed z_20 with a window calibrated to the actual
+        # mean-reversion speed of the current price series.
+        ou_hl = getattr(features, "ou_half_life", 20.0)
+        z_ou = getattr(features, "z_score_ou", z_20)
+
+        # Blend: weight OU z-score more when OU window differs significantly
+        # from fixed windows (indicates dynamic calibration is adding value)
+        ou_diff = abs(ou_hl - 20.0) / 20.0  # how different is OU from default
+        ou_weight = min(0.6, 0.3 + 0.3 * ou_diff)  # 0.3 to 0.6
+        fixed_weight = 1.0 - ou_weight
+
+        # Base MR score blending OU-calibrated and fixed z-scores
+        mr_score = -(
+            ou_weight * z_ou
+            + fixed_weight * 0.5 * z_20
+            + fixed_weight * 0.35 * z_50
+            + 0.15 * dist * 10.0
+        )
 
         # Volume filter: amplify signal when recent volume surges above average
         # High volume overreaction → stronger mean-reversion expected
