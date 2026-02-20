@@ -1,0 +1,128 @@
+# ═══════════════════════════════════════════════════════════
+# Darwin v5 — Auto Deploy a DigitalOcean
+# ═══════════════════════════════════════════════════════════
+#
+# Cada push a main:
+#   1. Corre los tests (si fallan, NO se hace deploy)
+#   2. Se conecta al servidor via SSH
+#   3. git pull + docker-compose build + docker-compose up -d
+#   4. Verifica que el contenedor quedó corriendo
+#
+# Secrets requeridos en GitHub → Settings → Secrets:
+#   DO_SSH_KEY       → contenido de tu llave privada SSH (~/.ssh/id_rsa)
+#   DO_HOST          → 68.183.214.231
+#   DO_USER          → root
+#   TELEGRAM_BOT_TOKEN  → para notificaciones de deploy (opcional)
+#   TELEGRAM_CHAT_ID    → tu chat id (opcional)
+# ═══════════════════════════════════════════════════════════
+
+name: Deploy Darwin v5
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:   # permite correrlo manualmente desde GitHub UI
+
+jobs:
+  # ── Job 1: Tests ─────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Run tests
+        run: |
+          python -m pytest test_evolution_fitness.py test_scorecard.py \
+            test_simulation.py test_fitness_model.py \
+            -q --asyncio-mode=auto
+        env:
+          PYTHONPATH: .
+
+  # ── Job 2: Deploy ─────────────────────────────────────────
+  deploy:
+    name: Deploy to DigitalOcean
+    runs-on: ubuntu-latest
+    needs: test          # solo si los tests pasan
+    if: success()
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
+            set -e
+
+            echo "──────────────────────────────────"
+            echo "🧬 Darwin v5 — Deploy iniciado"
+            echo "──────────────────────────────────"
+
+            cd ~/darwin-v4
+
+            # 1. Bajar código nuevo
+            git pull origin main
+
+            # 2. Rebuild imagen (fuerza que los cambios de Python se incluyan)
+            docker-compose build --no-cache
+
+            # 3. Reiniciar con el código nuevo (zero-downtime no aplica en trading,
+            #    mejor parar limpio y arrancar)
+            docker-compose down
+            docker-compose up -d
+
+            # 4. Esperar 10s y verificar que el contenedor está corriendo
+            sleep 10
+            STATUS=$(docker inspect -f '{{.State.Status}}' darwin-agent 2>/dev/null || echo "not_found")
+
+            if [ "$STATUS" = "running" ]; then
+              echo "✅ darwin-agent corriendo correctamente"
+              docker-compose logs --tail=20 darwin-agent
+            else
+              echo "❌ darwin-agent no arrancó (status: $STATUS)"
+              docker-compose logs --tail=50 darwin-agent
+              exit 1
+            fi
+
+      - name: Notificar éxito por Telegram
+        if: success()
+        run: |
+          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ]; then
+            COMMIT_MSG=$(echo "${{ github.event.head_commit.message }}" | head -1)
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -d parse_mode="Markdown" \
+              -d text="✅ *Darwin v5 deploy exitoso*
+            Commit: \`${{ github.sha }}\`
+            Mensaje: ${COMMIT_MSG}
+            Branch: \`${{ github.ref_name }}\`"
+          fi
+
+      - name: Notificar fallo por Telegram
+        if: failure()
+        run: |
+          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -d parse_mode="Markdown" \
+              -d text="❌ *Darwin v5 deploy FALLÓ*
+            Commit: \`${{ github.sha }}\`
+            Branch: \`${{ github.ref_name }}\`
+            Revisa: https://github.com/EJMM17/darwin-v4/actions"
+          fi
