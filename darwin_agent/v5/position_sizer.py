@@ -78,6 +78,7 @@ class SizeResult:
             "notional": round(self.notional, 4),
             "approved": self.approved,
             "rejection_reason": self.rejection_reason,
+            "notes": self.notes,
         }
 
 
@@ -100,15 +101,11 @@ class PositionSizer:
 
     def __init__(self, config: SizerConfig | None = None) -> None:
         self._config = config or SizerConfig()
-        self._daily_pnl: float = 0.0
-        self._daily_start_equity: float = 0.0
-        self._current_day: int = -1
         self._trade_pnls: list = []      # historial completo de PnL para Kelly Criterion
 
     def reset_daily(self, equity: float) -> None:
-        """Reset daily P&L tracking (call at start of each day)."""
-        self._daily_pnl = 0.0
-        self._daily_start_equity = equity
+        """Reset daily tracking (call at start of each day). Kept for Kelly context."""
+        pass
 
 
     def _compute_kelly_scale(self, cfg: SizerConfig) -> float:
@@ -161,8 +158,7 @@ class PositionSizer:
         return max(cfg.kelly_min, min(cfg.kelly_max, scale))
 
     def record_trade_pnl(self, pnl: float) -> None:
-        """Record a closed trade's P&L for daily loss and Kelly tracking."""
-        self._daily_pnl += pnl
+        """Record a closed trade's P&L for Kelly criterion tracking."""
         self._trade_pnls.append(pnl)
         # Cap history to 200 trades (memory efficiency)
         if len(self._trade_pnls) > 200:
@@ -179,6 +175,8 @@ class PositionSizer:
         current_exposure: float = 0.0,
         step_size: float = 0.0,
         risk_pct_override: float = 0.0,
+        daily_pnl: float = 0.0,
+        daily_start_equity: float = 0.0,
     ) -> SizeResult:
         """
         Compute position size for a new trade.
@@ -238,8 +236,8 @@ class PositionSizer:
         regime_scale = max(0.1, min(1.0, regime_multiplier))
         result.regime_scale = regime_scale
 
-        # 5. Daily loss scaling
-        daily_loss_scale = self._compute_daily_loss_scale(equity)
+        # 5. Daily loss scaling (uses engine's single source of truth)
+        daily_loss_scale = self._compute_daily_loss_scale(daily_pnl, daily_start_equity)
         result.daily_loss_scale = daily_loss_scale
 
         # 6. Confidence scaling: higher confidence → closer to full size
@@ -347,14 +345,14 @@ class PositionSizer:
         penalty = dd_ratio ** cfg.dd_scale_power
         return max(0.1, 1.0 - penalty * 0.9)  # floor at 10%
 
-    def _compute_daily_loss_scale(self, equity: float) -> float:
+    def _compute_daily_loss_scale(self, daily_pnl: float, daily_start_equity: float) -> float:
         """Check daily loss cap and return scaling factor."""
         cfg = self._config
-        if self._daily_start_equity <= 0:
+        if daily_start_equity <= 0:
             return 1.0
 
-        daily_loss_pct = abs(self._daily_pnl) / self._daily_start_equity * 100.0
-        if self._daily_pnl < 0 and daily_loss_pct >= cfg.daily_loss_cap_pct:
+        daily_loss_pct = abs(daily_pnl) / daily_start_equity * 100.0
+        if daily_pnl < 0 and daily_loss_pct >= cfg.daily_loss_cap_pct:
             logger.warning(
                 "daily loss cap reached: %.1f%% loss (cap: %.1f%%)",
                 daily_loss_pct,
