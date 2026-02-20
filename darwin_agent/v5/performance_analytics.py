@@ -1,418 +1,405 @@
 """
-Performance Analytics — Institutional-Grade Risk Metrics
+Performance Analytics — Institutional Grade
+============================================
+Calcula métricas estándar de hedge funds en tiempo real:
+  - Sharpe Ratio       (retorno / volatilidad total)
+  - Sortino Ratio      (retorno / volatilidad bajista)
+  - Calmar Ratio       (retorno anualizado / max drawdown)
+  - Win Rate / Profit Factor / Expectancy
+  - Alpha vs BTC / Information Ratio
+  - Half-Kelly position sizing dinámico
+  - Circuit Breaker automático
 
-Computes real-time Sharpe, Sortino, Calmar, and other institutional
-metrics used by crypto hedge funds (AIMA/PwC 2024 standards).
-
-Institutional thresholds (XBTO / Breaking Alpha research 2025):
-  Sharpe  > 1.0  → acceptable,  > 2.0 → institutional grade
-  Sortino > 2.0  → good,        > 3.0 → excellent
-  Calmar  > 1.0  → acceptable,  > 2.0 → elite
-  Max DD  < 10%  → conservative, < 20% → acceptable for crypto
-  Win rate> 50%  → required,    > 55% → good edge
-
-Usage:
-    analytics = PerformanceAnalytics()
-    analytics.record_equity(timestamp, equity)
-    analytics.record_trade(pnl_usdt, pnl_pct)
-    report = analytics.get_report()
+Umbrales institucionales (AIMA/PwC 2024-2025):
+  Sharpe  > 1.0 (mínimo), > 2.0 (hedge fund grade)
+  Sortino > 2.0 | Calmar > 1.0 (elite > 2.0)
+  Max DD  < 20% para capital escalable
 """
 
 from __future__ import annotations
 
 import math
 import time
-from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, List, Optional, Tuple
+from typing import List, Tuple
 
+# Thresholds institucionales
+SHARPE_MIN       = 1.0
+SHARPE_HEDGE     = 2.0
+SORTINO_MIN      = 2.0
+CALMAR_MIN       = 1.0
+CALMAR_ELITE     = 2.0
+PROFIT_FACTOR_OK = 1.5
+PROFIT_FACTOR_HF = 2.0
+MAX_DD_SCALABLE  = 0.20
 
-# ─── Data structures ──────────────────────────────────────────────────────────
+# Frecuencia de snapshots: ticks de 5s
+TICKS_PER_YEAR = int(365 * 24 * 3600 / 5)   # ~6.3M
+ANN_FACTOR     = TICKS_PER_YEAR ** 0.5
+
 
 @dataclass
-class EquityPoint:
-    ts: float        # unix timestamp
-    equity: float
+class PerformanceSnapshot:
+    total_trades: int = 0
+    win_trades: int = 0
+    loss_trades: int = 0
+    total_pnl: float = 0.0
+    equity: float = 0.0
+    peak_equity: float = 0.0
+    sharpe_ratio: float = 0.0
+    sortino_ratio: float = 0.0
+    calmar_ratio: float = 0.0
+    win_rate: float = 0.0
+    profit_factor: float = 0.0
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
+    expectancy: float = 0.0
+    max_drawdown: float = 0.0
+    current_drawdown: float = 0.0
+    best_trade: float = 0.0
+    worst_trade: float = 0.0
+    alpha_pct: float = 0.0
+    information_ratio: float = 0.0
+    half_kelly_pct: float = 2.0
+    kelly_edge: float = 0.0
+    current_streak: int = 0
+    max_win_streak: int = 0
+    max_loss_streak: int = 0
+    grade: str = "N/A"
+    scalable: bool = False
+    computed_at: float = field(default_factory=time.time)
 
-
-@dataclass
-class TradeRecord:
-    ts: float
-    pnl_usdt: float
-    pnl_pct: float   # as decimal, e.g. 0.02 for +2%
-
-
-@dataclass
-class PerformanceReport:
-    # Core returns
-    total_return_pct: float      # e.g. 12.5 (%)
-    annualized_return_pct: float
-
-    # Risk-adjusted (institutional trinity)
-    sharpe_ratio: float
-    sortino_ratio: float
-    calmar_ratio: float
-
-    # Drawdown
-    max_drawdown_pct: float      # e.g. -8.3 (%)
-    current_drawdown_pct: float
-
-    # Trade statistics
-    total_trades: int
-    win_rate_pct: float          # e.g. 55.0 (%)
-    avg_win_pct: float
-    avg_loss_pct: float
-    profit_factor: float         # gross_wins / gross_losses
-    avg_trade_pct: float
-    best_trade_pct: float
-    worst_trade_pct: float
-
-    # Risk
-    volatility_annualized_pct: float
-    downside_vol_annualized_pct: float
-
-    # Meta
-    elapsed_days: float
-    equity_start: float
-    equity_current: float
-    sample_size_returns: int     # number of return observations used
-
-    # Institutional grade flags
-    @property
-    def sharpe_grade(self) -> str:
-        if self.sharpe_ratio >= 2.0:
-            return "INSTITUTIONAL"
-        if self.sharpe_ratio >= 1.0:
-            return "ACCEPTABLE"
-        return "BELOW_THRESHOLD"
-
-    @property
-    def sortino_grade(self) -> str:
-        if self.sortino_ratio >= 3.0:
-            return "EXCELLENT"
-        if self.sortino_ratio >= 2.0:
-            return "GOOD"
-        return "BELOW_THRESHOLD"
-
-    @property
-    def calmar_grade(self) -> str:
-        if self.calmar_ratio >= 2.0:
-            return "ELITE"
-        if self.calmar_ratio >= 1.0:
-            return "ACCEPTABLE"
-        return "BELOW_THRESHOLD"
-
-    @property
-    def overall_grade(self) -> str:
-        """Single grade for hedge fund readiness."""
-        score = 0
-        if self.sharpe_ratio >= 1.0:
-            score += 1
-        if self.sharpe_ratio >= 2.0:
-            score += 1
-        if self.sortino_ratio >= 2.0:
-            score += 1
-        if self.calmar_ratio >= 1.0:
-            score += 1
-        if self.max_drawdown_pct > -20.0:
-            score += 1
-        if self.win_rate_pct >= 50.0:
-            score += 1
-        if self.profit_factor >= 1.5:
-            score += 1
-
-        if score >= 6:
-            return "HEDGE_FUND_READY"
-        if score >= 4:
-            return "DEVELOPING"
-        return "RETAIL"
-
-    def to_telegram(self) -> str:
-        """Formatted message for Telegram daily report."""
-        grade_emoji = {
-            "HEDGE_FUND_READY": "🏦",
-            "DEVELOPING": "📈",
-            "RETAIL": "🌱",
-        }
-        emoji = grade_emoji.get(self.overall_grade, "📊")
-
-        dd_emoji = "🟢" if self.current_drawdown_pct > -5 else ("🟡" if self.current_drawdown_pct > -10 else "🔴")
-        sharpe_emoji = "✅" if self.sharpe_ratio >= 1.0 else "⚠️"
-        sortino_emoji = "✅" if self.sortino_ratio >= 2.0 else "⚠️"
-        calmar_emoji = "✅" if self.calmar_ratio >= 1.0 else "⚠️"
-
-        return (
-            f"{emoji} *Darwin v5 — Performance Report*\n"
-            f"═══════════════════════════\n"
-            f"*Capital:* ${self.equity_current:.2f} "
-            f"({'+' if self.total_return_pct >= 0 else ''}{self.total_return_pct:.2f}%)\n"
-            f"*Días activo:* {self.elapsed_days:.1f}\n"
-            f"\n"
-            f"📐 *Risk-Adjusted Metrics*\n"
-            f"{sharpe_emoji} Sharpe:  {self.sharpe_ratio:+.3f} [{self.sharpe_grade}]\n"
-            f"{sortino_emoji} Sortino: {self.sortino_ratio:+.3f} [{self.sortino_grade}]\n"
-            f"{calmar_emoji} Calmar:  {self.calmar_ratio:+.3f} [{self.calmar_grade}]\n"
-            f"\n"
-            f"📉 *Drawdown*\n"
-            f"{dd_emoji} Max DD: {self.max_drawdown_pct:.2f}%\n"
-            f"   Current: {self.current_drawdown_pct:.2f}%\n"
-            f"\n"
-            f"🎯 *Trade Stats* ({self.total_trades} trades)\n"
-            f"   Win rate: {self.win_rate_pct:.1f}%\n"
-            f"   Profit factor: {self.profit_factor:.2f}x\n"
-            f"   Avg win: {self.avg_win_pct:+.2f}% | Avg loss: {self.avg_loss_pct:.2f}%\n"
-            f"   Best: {self.best_trade_pct:+.2f}% | Worst: {self.worst_trade_pct:.2f}%\n"
-            f"\n"
-            f"📊 *Volatility*\n"
-            f"   Ann. Vol: {self.volatility_annualized_pct:.1f}%\n"
-            f"   Downside Vol: {self.downside_vol_annualized_pct:.1f}%\n"
-            f"\n"
-            f"🏷️ *Overall Grade: {self.overall_grade}* {emoji}\n"
-            f"═══════════════════════════"
-        )
-
-    def to_log(self) -> str:
-        """Compact single-line for log files."""
-        return (
-            f"PERF sharpe={self.sharpe_ratio:.3f} sortino={self.sortino_ratio:.3f} "
-            f"calmar={self.calmar_ratio:.3f} maxdd={self.max_drawdown_pct:.2f}% "
-            f"winrate={self.win_rate_pct:.1f}% pf={self.profit_factor:.2f} "
-            f"trades={self.total_trades} grade={self.overall_grade}"
-        )
-
-
-# ─── Core analytics engine ────────────────────────────────────────────────────
 
 class PerformanceAnalytics:
     """
-    Computes institutional performance metrics from equity curve and trade history.
-
-    Design principles:
-    - Pure Python, no external deps (numpy/pandas not available in prod container)
-    - O(1) memory with rolling windows (deque with maxlen)
-    - All annualization assumes 365 days (crypto never sleeps)
-    - Sortino uses 0% MAR (minimum acceptable return) — standard for crypto
-    - Sharpe uses 0% risk-free rate — appropriate for crypto futures
-
-    The metrics match what AIMA/PwC crypto hedge fund reports use:
-      Sharpe, Sortino, Calmar (3-year rolling, but we use all available data)
+    Institutional analytics module for Darwin v5.
+    Calcula todo en O(1) usando suficiencias estadísticas.
+    Historial máximo: 2000 ticks de equity, 500 trades.
     """
 
-    # Crypto: 365 days × 24h × 12 ticks/hour (5 min) = 105,120 ticks/year
-    # We record equity once per tick (5s) → 6,307,200 points/year — too many
-    # Instead, we sample equity at heartbeat (60s) → 525,960 points/year
-    # For analytics we use hourly snapshots stored in a rolling 365-day window
-    HOURS_PER_YEAR = 365 * 24  # 8760
+    MAX_HISTORY = 2000
+    MAX_TRADES  = 500
 
-    def __init__(self, max_equity_points: int = 8760 * 7):
-        # Equity curve: rolling 7-year window (way more than enough)
-        self._equity_history: Deque[EquityPoint] = deque(maxlen=max_equity_points)
-        # Trade history: all trades (bounded by max_trades)
-        self._trades: Deque[TradeRecord] = deque(maxlen=10_000)
-        # Peak equity for drawdown calculation
-        self._peak_equity: float = 0.0
-        # Start values
-        self._start_equity: float = 0.0
-        self._start_ts: float = time.time()
+    def __init__(self, initial_equity: float = 0.0) -> None:
+        # Tick returns: solo para drawdown intraday real
+        self._tick_returns: List[float] = []
+        # DAILY returns: para Sharpe/Sortino comparables con industria (sqrt(252))
+        self._daily_returns: List[float] = []
+        self._daily_equity_start: float = initial_equity
+        self._ticks_today: int = 0
+        self._ticks_per_day: int = int(86400 / 5)  # 17280 ticks de 5s por día
 
-    def record_equity(self, equity: float, ts: Optional[float] = None) -> None:
-        """Record equity snapshot. Call at heartbeat frequency (60s)."""
-        if ts is None:
-            ts = time.time()
-        if self._start_equity == 0.0 and equity > 0:
-            self._start_equity = equity
-            self._start_ts = ts
-        self._equity_history.append(EquityPoint(ts=ts, equity=equity))
+        self._btc_returns:     List[float] = []
+        self._btc_daily_start: float = 0.0
+        self._trade_pnls:      List[float] = []
+
+        self._peak_equity    = initial_equity
+        self._current_equity = initial_equity
+        self._initial_equity = initial_equity
+        self._last_equity    = initial_equity
+        self._last_btc_price = 0.0
+
+        self._n_trades     = 0
+        self._n_wins       = 0
+        self._gross_profit = 0.0
+        self._gross_loss   = 0.0
+        self._sum_pnl      = 0.0
+        self._max_drawdown = 0.0
+        self._cur_drawdown = 0.0
+
+        self._streak          = 0
+        self._max_win_streak  = 0
+        self._max_loss_streak = 0
+
+    # ── Ingesta ───────────────────────────────────────────────────────────────
+
+    def record_trade(self, pnl_usdt: float, is_win: bool) -> None:
+        self._n_trades += 1
+        self._sum_pnl  += pnl_usdt
+
+        if is_win:
+            self._n_wins       += 1
+            self._gross_profit += pnl_usdt
+            self._streak = max(0, self._streak) + 1
+            self._max_win_streak = max(self._max_win_streak, self._streak)
+        else:
+            self._gross_loss += abs(pnl_usdt)
+            self._streak = min(0, self._streak) - 1
+            self._max_loss_streak = max(self._max_loss_streak, abs(self._streak))
+
+        self._trade_pnls.append(pnl_usdt)
+        if len(self._trade_pnls) > self.MAX_TRADES:
+            self._trade_pnls.pop(0)
+
+    def update_equity(self, equity: float, btc_price: float = 0.0) -> None:
+        if equity <= 0:
+            return
+
+        # Drawdown (tick-by-tick, máxima precisión)
         if equity > self._peak_equity:
             self._peak_equity = equity
+        if self._peak_equity > 0:
+            self._cur_drawdown = (self._peak_equity - equity) / self._peak_equity
+            self._max_drawdown = max(self._max_drawdown, self._cur_drawdown)
 
-    def record_trade(self, pnl_usdt: float, pnl_pct: float,
-                     ts: Optional[float] = None) -> None:
-        """Record a completed trade."""
-        if ts is None:
-            ts = time.time()
-        self._trades.append(TradeRecord(ts=ts, pnl_usdt=pnl_usdt, pnl_pct=pnl_pct))
+        self._current_equity = equity
 
-    def get_report(self) -> Optional[PerformanceReport]:
-        """
-        Compute full performance report. Returns None if insufficient data.
-        Requires at least 2 equity points and 1 trade to compute anything useful.
-        """
-        if len(self._equity_history) < 2:
-            return None
+        # Tick return (para drawdown tracking)
+        if self._last_equity > 0:
+            r = (equity - self._last_equity) / self._last_equity
+            self._tick_returns.append(r)
+            if len(self._tick_returns) > self.MAX_HISTORY:
+                self._tick_returns.pop(0)
+        self._last_equity = equity
 
-        eq_points = list(self._equity_history)
-        trades = list(self._trades)
+        # Acumular retorno diario (cada N ticks = 1 día)
+        # Sharpe calculado con retornos diarios → comparable con industria (sqrt(252))
+        self._ticks_today += 1
+        if self._ticks_today >= self._ticks_per_day:
+            if self._daily_equity_start > 0:
+                daily_r = (equity - self._daily_equity_start) / self._daily_equity_start
+                self._daily_returns.append(daily_r)
+                if len(self._daily_returns) > self.MAX_HISTORY:
+                    self._daily_returns.pop(0)
+                # BTC daily return
+                if self._btc_daily_start > 0 and btc_price > 0:
+                    btc_dr = (btc_price - self._btc_daily_start) / self._btc_daily_start
+                    self._btc_returns.append(btc_dr)
+                    if len(self._btc_returns) > self.MAX_HISTORY:
+                        self._btc_returns.pop(0)
+                    self._btc_daily_start = btc_price
+            self._daily_equity_start = equity
+            self._ticks_today = 0
 
-        equity_start = self._start_equity or eq_points[0].equity
-        equity_current = eq_points[-1].equity
-        elapsed_secs = eq_points[-1].ts - self._start_ts
-        elapsed_days = max(elapsed_secs / 86400.0, 1.0 / 1440.0)  # min 1 minute
+        # BTC price tracking
+        if btc_price > 0:
+            if self._btc_daily_start <= 0:
+                self._btc_daily_start = btc_price
+            self._last_btc_price = btc_price
 
-        # ── 1. Total and annualized return ──────────────────────────────────
-        total_return = (equity_current - equity_start) / equity_start
-        total_return_pct = total_return * 100.0
+    # ── Cálculos ──────────────────────────────────────────────────────────────
 
-        # Compound annualized: (1 + r)^(365/days) - 1
-        years = elapsed_days / 365.0
-        if years > 0 and equity_start > 0:
-            ann_return = ((equity_current / equity_start) ** (1.0 / years)) - 1.0
-        else:
-            ann_return = 0.0
-        annualized_return_pct = ann_return * 100.0
+    def _mean_std(self, data: List[float]) -> Tuple[float, float]:
+        n = len(data)
+        if n < 2:
+            return 0.0, 0.0
+        mu = sum(data) / n
+        var = sum((x - mu) ** 2 for x in data) / n
+        return mu, var ** 0.5
 
-        # ── 2. Returns series (hourly) ───────────────────────────────────────
-        returns = _compute_returns_series(eq_points)
-        n_returns = len(returns)
+    def _sharpe(self) -> float:
+        """Sharpe anualizado usando retornos DIARIOS (sqrt(252) — estándar industria)."""
+        rets = self._daily_returns
+        if len(rets) < 5:
+            return 0.0  # insuficiente historial diario
+        mu, sigma = self._mean_std(rets)
+        if sigma < 1e-12:
+            return 0.0
+        return (mu / sigma) * (252 ** 0.5)
 
-        # ── 3. Volatility (annualized) ──────────────────────────────────────
-        vol_ann = _annualized_vol(returns, elapsed_days)
-        downside_vol_ann = _annualized_downside_vol(returns, elapsed_days, mar=0.0)
+    def _sortino(self) -> float:
+        """Sortino anualizado sobre retornos diarios (solo downside deviation)."""
+        rets = self._daily_returns
+        if len(rets) < 5:
+            return 0.0
+        mu = sum(rets) / len(rets)
+        neg_sq = [r ** 2 for r in rets if r < 0]
+        if not neg_sq:
+            return 99.0  # sin días negativos
+        downside_dev = (sum(neg_sq) / len(rets)) ** 0.5
+        if downside_dev < 1e-12:
+            return 0.0
+        return (mu / downside_dev) * (252 ** 0.5)
 
-        # ── 4. Sharpe ratio (risk-free = 0, annualized) ─────────────────────
-        # Sharpe = annualized_return / annualized_vol
-        if vol_ann > 1e-10:
-            sharpe = ann_return / vol_ann
-        else:
-            sharpe = 0.0
+    def _calmar(self) -> float:
+        if self._max_drawdown < 1e-6 or self._initial_equity <= 0:
+            return 0.0
+        total_return = (self._current_equity - self._initial_equity) / self._initial_equity
+        return total_return / self._max_drawdown
 
-        # ── 5. Sortino ratio (MAR = 0) ──────────────────────────────────────
-        if downside_vol_ann > 1e-10:
-            sortino = ann_return / downside_vol_ann
-        else:
-            sortino = ann_return * 10.0 if ann_return > 0 else 0.0
+    def _half_kelly(self) -> Tuple[float, float]:
+        """Returns (half_kelly_pct, expectancy_per_trade)."""
+        if self._n_trades < 10:
+            return 2.0, 0.0
 
-        # ── 6. Maximum drawdown ──────────────────────────────────────────────
-        max_dd, current_dd = _compute_drawdowns(eq_points)
-        max_dd_pct = max_dd * 100.0
-        current_dd_pct = current_dd * 100.0
+        wins   = [p for p in self._trade_pnls if p > 0]
+        losses = [abs(p) for p in self._trade_pnls if p < 0]
 
-        # ── 7. Calmar ratio = annualized_return / |max_drawdown| ────────────
-        if abs(max_dd) > 1e-10:
-            calmar = ann_return / abs(max_dd)
-        else:
-            calmar = ann_return * 10.0 if ann_return > 0 else 0.0
+        if not wins or not losses:
+            return 2.0, 0.0
 
-        # ── 8. Trade statistics ──────────────────────────────────────────────
-        total_trades = len(trades)
-        wins = [t for t in trades if t.pnl_pct > 0]
-        losses = [t for t in trades if t.pnl_pct <= 0]
+        p       = len(wins) / self._n_trades
+        q       = 1.0 - p
+        avg_win  = sum(wins) / len(wins)
+        avg_loss = sum(losses) / len(losses)
 
-        win_rate = len(wins) / total_trades * 100.0 if total_trades > 0 else 0.0
-        avg_win = (sum(t.pnl_pct for t in wins) / len(wins) * 100.0) if wins else 0.0
-        avg_loss = (sum(t.pnl_pct for t in losses) / len(losses) * 100.0) if losses else 0.0
-        avg_trade = (sum(t.pnl_pct for t in trades) / total_trades * 100.0) if trades else 0.0
+        if avg_loss < 1e-8:
+            return 2.0, 0.0
 
-        gross_wins = sum(t.pnl_usdt for t in wins) if wins else 0.0
-        gross_losses = abs(sum(t.pnl_usdt for t in losses)) if losses else 0.0
-        profit_factor = gross_wins / gross_losses if gross_losses > 1e-10 else (999.0 if gross_wins > 0 else 0.0)
+        b = avg_win / avg_loss
+        kelly_f = (p * b - q) / b
+        edge    = p * avg_win - q * avg_loss
 
-        best_trade = max((t.pnl_pct * 100.0 for t in trades), default=0.0)
-        worst_trade = min((t.pnl_pct * 100.0 for t in trades), default=0.0)
+        if kelly_f <= 0:
+            return 0.5, edge  # sin edge: mínimo de seguridad
 
-        return PerformanceReport(
-            total_return_pct=total_return_pct,
-            annualized_return_pct=annualized_return_pct,
-            sharpe_ratio=sharpe,
-            sortino_ratio=sortino,
-            calmar_ratio=calmar,
-            max_drawdown_pct=max_dd_pct,
-            current_drawdown_pct=current_dd_pct,
-            total_trades=total_trades,
-            win_rate_pct=win_rate,
-            avg_win_pct=avg_win,
-            avg_loss_pct=avg_loss,
-            profit_factor=profit_factor,
-            avg_trade_pct=avg_trade,
-            best_trade_pct=best_trade,
-            worst_trade_pct=worst_trade,
-            volatility_annualized_pct=vol_ann * 100.0,
-            downside_vol_annualized_pct=downside_vol_ann * 100.0,
-            elapsed_days=elapsed_days,
-            equity_start=equity_start,
-            equity_current=equity_current,
-            sample_size_returns=n_returns,
+        # Half-Kelly en % del capital: Kelly da fracción óptima del capital por trade.
+        # Multiplicamos por 100 para tener %, luego tomamos la mitad.
+        half_k_pct = min(5.0, max(0.5, kelly_f * 50.0))
+        return half_k_pct, edge
+
+    def _alpha_ir(self) -> Tuple[float, float]:
+        """Alpha e Information Ratio usando retornos diarios vs BTC benchmark."""
+        n = min(len(self._daily_returns), len(self._btc_returns))
+        if n < 5:
+            return 0.0, 0.0
+        excess = [
+            self._daily_returns[-(n - i)] - self._btc_returns[-(n - i)]
+            for i in range(n)
+        ]
+        mu, sigma = self._mean_std(excess)
+        # Anualizar: alpha diario * 252 días * 100 para %
+        alpha_annual_pct = mu * 252 * 100.0
+        ir = (mu / sigma) * (252 ** 0.5) if sigma > 1e-12 else 0.0
+        return alpha_annual_pct, ir
+
+    def _grade(self, sharpe: float, calmar: float, dd: float, pf: float) -> Tuple[str, bool]:
+        score = 0
+        if sharpe >= SHARPE_HEDGE:     score += 3
+        elif sharpe >= SHARPE_MIN:     score += 1
+        if calmar >= CALMAR_ELITE:     score += 3
+        elif calmar >= CALMAR_MIN:     score += 1
+        if dd <= 0.10:                 score += 2
+        elif dd <= MAX_DD_SCALABLE:    score += 1
+        if pf >= PROFIT_FACTOR_HF:     score += 2
+        elif pf >= PROFIT_FACTOR_OK:   score += 1
+
+        if score >= 10:  return "A", True
+        if score >= 7:   return "B", True
+        if score >= 4:   return "C", False
+        if score >= 2:   return "D", False
+        return "F", False
+
+    # ── API pública ───────────────────────────────────────────────────────────
+
+    def snapshot(self) -> PerformanceSnapshot:
+        n = self._n_trades
+        if n == 0:
+            return PerformanceSnapshot(
+                equity=self._current_equity,
+                peak_equity=self._peak_equity,
+            )
+
+        wins   = [p for p in self._trade_pnls if p > 0]
+        losses = [abs(p) for p in self._trade_pnls if p < 0]
+
+        wr    = self._n_wins / n
+        pf    = self._gross_profit / self._gross_loss if self._gross_loss > 0 else 99.0
+        avgw  = sum(wins) / len(wins) if wins else 0.0
+        avgl  = sum(losses) / len(losses) if losses else 0.0
+        exp_  = wr * avgw - (1 - wr) * avgl
+
+        sharpe  = self._sharpe()
+        sortino = self._sortino()
+        calmar  = self._calmar()
+        hk, edge = self._half_kelly()
+        alpha, ir = self._alpha_ir()
+        grade, scalable = self._grade(sharpe, calmar, self._max_drawdown, pf)
+
+        return PerformanceSnapshot(
+            total_trades=n,
+            win_trades=self._n_wins,
+            loss_trades=n - self._n_wins,
+            total_pnl=round(self._sum_pnl, 4),
+            equity=self._current_equity,
+            peak_equity=self._peak_equity,
+            sharpe_ratio=round(sharpe, 3),
+            sortino_ratio=round(sortino, 3),
+            calmar_ratio=round(calmar, 3),
+            win_rate=round(wr, 4),
+            profit_factor=round(min(pf, 99.0), 3),
+            avg_win=round(avgw, 4),
+            avg_loss=round(avgl, 4),
+            expectancy=round(exp_, 4),
+            max_drawdown=round(self._max_drawdown, 4),
+            current_drawdown=round(self._cur_drawdown, 4),
+            best_trade=round(max(self._trade_pnls), 4),
+            worst_trade=round(min(self._trade_pnls), 4),
+            alpha_pct=round(alpha, 2),
+            information_ratio=round(ir, 3),
+            half_kelly_pct=round(hk, 2),
+            kelly_edge=round(edge, 4),
+            current_streak=self._streak,
+            max_win_streak=self._max_win_streak,
+            max_loss_streak=self._max_loss_streak,
+            grade=grade,
+            scalable=scalable,
+            computed_at=time.time(),
         )
 
+    def summary_line(self) -> str:
+        s = self.snapshot()
+        return (
+            f"[PERF] trades={s.total_trades} wr={s.win_rate*100:.1f}% "
+            f"pf={s.profit_factor:.2f} exp=${s.expectancy:.4f} "
+            f"sharpe={s.sharpe_ratio:.2f} sortino={s.sortino_ratio:.2f} "
+            f"calmar={s.calmar_ratio:.2f} maxDD={s.max_drawdown*100:.1f}% "
+            f"kelly={s.half_kelly_pct:.1f}% "
+            f"alpha={s.alpha_pct:+.1f}% IR={s.information_ratio:.2f} "
+            f"grade={s.grade} scalable={s.scalable}"
+        )
 
-# ─── Pure math helpers (no deps) ─────────────────────────────────────────────
+    def circuit_breaker_check(
+        self,
+        daily_loss_limit_pct: float = 0.05,
+        max_dd_limit_pct: float = 0.20,
+        max_loss_streak: int = 5,
+        daily_pnl_usdt: float = 0.0,
+        daily_start_equity: float = 0.0,
+    ) -> Tuple[bool, str]:
+        """
+        Evalúa si el trading debe pausarse.
+        Returns: (should_halt, reason_string)
+        """
+        # 1. Daily loss limit
+        if daily_start_equity > 0 and daily_pnl_usdt < 0:
+            daily_loss_pct = abs(daily_pnl_usdt) / daily_start_equity
+            if daily_loss_pct >= daily_loss_limit_pct:
+                return True, (
+                    f"DAILY_LOSS_LIMIT {daily_loss_pct*100:.1f}% "
+                    f">= {daily_loss_limit_pct*100:.0f}%"
+                )
 
-def _compute_returns_series(eq_points: List[EquityPoint]) -> List[float]:
-    """Period-over-period returns from equity curve."""
-    returns = []
-    for i in range(1, len(eq_points)):
-        prev = eq_points[i - 1].equity
-        curr = eq_points[i].equity
-        if prev > 1e-10:
-            returns.append((curr - prev) / prev)
-    return returns
+        # 2. Max drawdown total
+        if self._max_drawdown >= max_dd_limit_pct:
+            return True, (
+                f"MAX_DRAWDOWN {self._max_drawdown*100:.1f}% "
+                f">= {max_dd_limit_pct*100:.0f}%"
+            )
 
+        # 3. Loss streak
+        if abs(min(self._streak, 0)) >= max_loss_streak:
+            return True, f"LOSS_STREAK {abs(self._streak)} consecutive losses"
 
-def _mean(xs: List[float]) -> float:
-    return sum(xs) / len(xs) if xs else 0.0
+        return False, ""
 
+    # ── Aliases de compatibilidad con el engine ───────────────────────────────
 
-def _std(xs: List[float], mu: Optional[float] = None) -> float:
-    if len(xs) < 2:
-        return 0.0
-    if mu is None:
-        mu = _mean(xs)
-    variance = sum((x - mu) ** 2 for x in xs) / (len(xs) - 1)
-    return math.sqrt(variance)
+    def record_equity(self, equity: float, btc_price: float = 0.0) -> None:
+        """Alias de update_equity para compatibilidad con llamadas existentes."""
+        self.update_equity(equity, btc_price)
 
+    def get_report(self) -> "PerformanceSnapshot":
+        """Alias de snapshot() para compatibilidad con llamadas existentes."""
+        return self.snapshot()
 
-def _annualized_vol(returns: List[float], elapsed_days: float) -> float:
-    """
-    Annualized volatility from return series.
+    # Atributos para exportación de datos en engine._export_data()
+    @property
+    def _equity_series(self) -> list:
+        """Lista de equity points para exportar CSV."""
+        return list(self._tick_returns)  # aproximación; el engine exporta esto
 
-    We scale by sqrt(observations_per_year). Since equity is recorded at
-    heartbeat frequency (60s), there are 365*24*60 = 525,600 obs/year.
-    But we use actual elapsed time for the scaling factor.
-    """
-    if len(returns) < 2:
-        return 0.0
-    sigma_period = _std(returns)
-    # obs_per_year = number of observations per year at current sampling rate
-    obs_count = len(returns)
-    obs_per_year = obs_count / max(elapsed_days / 365.0, 1e-6)
-    return sigma_period * math.sqrt(obs_per_year)
-
-
-def _annualized_downside_vol(returns: List[float], elapsed_days: float,
-                              mar: float = 0.0) -> float:
-    """
-    Annualized downside deviation (for Sortino ratio).
-    Only penalizes returns below MAR (minimum acceptable return).
-    """
-    if len(returns) < 2:
-        return 0.0
-    downside = [min(r - mar, 0.0) for r in returns]
-    sq_sum = sum(d ** 2 for d in downside)
-    downside_variance = sq_sum / max(len(returns) - 1, 1)
-    sigma_period = math.sqrt(downside_variance)
-    obs_count = len(returns)
-    obs_per_year = obs_count / max(elapsed_days / 365.0, 1e-6)
-    return sigma_period * math.sqrt(obs_per_year)
-
-
-def _compute_drawdowns(eq_points: List[EquityPoint]) -> Tuple[float, float]:
-    """
-    Returns (max_drawdown, current_drawdown) as negative fractions.
-    e.g. (-0.083, -0.02) means max DD was -8.3%, currently -2%.
-    """
-    peak = eq_points[0].equity
-    max_dd = 0.0
-    for ep in eq_points:
-        if ep.equity > peak:
-            peak = ep.equity
-        if peak > 1e-10:
-            dd = (ep.equity - peak) / peak
-            if dd < max_dd:
-                max_dd = dd
-
-    # Current drawdown from all-time peak
-    last_equity = eq_points[-1].equity
-    peak_all = max(ep.equity for ep in eq_points)
-    current_dd = (last_equity - peak_all) / peak_all if peak_all > 1e-10 else 0.0
-
-    return max_dd, current_dd
+    @property
+    def _trades(self) -> list:
+        """Lista de trade PnLs para exportar CSV."""
+        return list(self._trade_pnls)

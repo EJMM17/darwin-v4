@@ -397,22 +397,16 @@ class DarwinV5Engine:
                 drawdown_pct=self._state.drawdown_pct,
             )
             # Feed equity snapshot to performance analytics (institutional metrics)
-            self._analytics.record_equity(self._state.equity)
+            self._analytics.update_equity(self._state.equity)
             # Log live metrics every 5 minutes (every 5 heartbeats at 12 ticks/heartbeat)
             if tick % (self._config.heartbeat_interval_ticks * 5) == 0:
-                report = self._analytics.get_report()
-                if report:
-                    logger.info(
-                        "PERF | Sharpe=%.2f(%s) Sortino=%.2f(%s) Calmar=%.2f(%s) "
-                        "DD=%.1f%% WinRate=%.1f%% PF=%.2f Trades=%d",
-                        report.sharpe_ratio, report.sharpe_grade(),
-                        report.sortino_ratio, report.sortino_grade(),
-                        report.calmar_ratio, report.calmar_grade(),
-                        report.max_drawdown_pct,
-                        report.win_rate_pct,
-                        report.profit_factor,
-                        report.total_trades,
-                    )
+                snap = self._analytics.snapshot()
+                if snap and snap.n_trades > 0:
+                    logger.info(self._analytics.summary_line())
+                    # Circuit breaker check (institutional risk controls)
+                    breached, reason = self._analytics.circuit_breaker_check()
+                    if breached:
+                        logger.warning("CIRCUIT BREAKER: %s", reason)
             # Record equity for real-time Sharpe/Sortino/Calmar computation
             self._analytics.record_equity(self._state.equity)
             # Update portfolio risk daily equity (circuit breaker + Kelly)
@@ -478,13 +472,13 @@ class DarwinV5Engine:
         # Equity curve
         eq_path = f"{out_dir}/equity_curve_{today_str}.csv"
         try:
+            snap = self._analytics.snapshot()
             with open(eq_path, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["timestamp_utc", "equity_usdt"])
-                for ep in self._analytics._equity_series:
-                    ts_str = _dt.datetime.utcfromtimestamp(ep.ts).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    writer.writerow([ts_str, f"{ep.equity:.4f}"])
-            logger.info("equity curve exported: %s (%d rows)", eq_path, len(self._analytics._equity_series))
+                writer.writerow(["timestamp_utc", "equity_usdt", "drawdown_pct"])
+                # Use snapshot summary for the CSV
+                writer.writerow([today_str, f"{snap.equity_current:.4f}", f"{snap.cur_drawdown_pct:.4f}"])
+            logger.info("equity snapshot exported: %s", eq_path)
         except Exception as exc:
             logger.warning("equity CSV export failed: %s", exc)
 
@@ -493,24 +487,16 @@ class DarwinV5Engine:
         try:
             with open(trades_path, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["timestamp_utc", "pnl_usdt", "pnl_pct"])
-                for tr in self._analytics._trades:
-                    ts_str = _dt.datetime.utcfromtimestamp(tr.ts).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    writer.writerow([ts_str, f"{tr.pnl_usdt:.4f}", f"{tr.pnl_pct*100:.4f}"])
-            logger.info("trade history exported: %s (%d trades)", trades_path, len(self._analytics._trades))
+                writer.writerow(["pnl_usdt"])
+                for pnl in self._analytics._trade_pnls:
+                    writer.writerow([f"{pnl:.4f}"])
+            logger.info("trade history exported: %s (%d trades)", trades_path, len(self._analytics._trade_pnls))
         except Exception as exc:
             logger.warning("trade history CSV export failed: %s", exc)
 
         # Summary metrics to log
-        if report.total_trades >= 5:
-            logger.info(
-                "DAILY REPORT | Return=%.2f%% Sharpe=%.2f Sortino=%.2f Calmar=%.2f "
-                "MaxDD=%.1f%% WinRate=%.1f%% PF=%.2f | Grade=%s",
-                report.total_return_pct,
-                report.sharpe_ratio, report.sortino_ratio, report.calmar_ratio,
-                report.max_drawdown_pct, report.win_rate_pct, report.profit_factor,
-                report.overall_grade(),
-            )
+        if snap and snap.n_trades >= 5:
+            logger.info("DAILY REPORT | %s", self._analytics.summary_line())
 
     async def _check_kill_switches(self) -> None:
         """
@@ -699,7 +685,7 @@ class DarwinV5Engine:
                 self._position_sizer.record_trade_pnl(pnl_usdt)
                 self._state.trade_pnls.append(pnl_usdt)
                 # Feed trade to institutional performance analytics
-                self._analytics.record_trade(pnl_usdt=pnl_usdt, pnl_pct=pnl_pct)
+                self._analytics.record_trade(pnl_usdt=pnl_usdt, is_win=(pnl_usdt > 0))
                 # Institutional metrics + Kelly calibration
                 self._analytics.record_trade(pnl_usdt=pnl_usdt, pnl_pct=pnl_pct)
                 self._portfolio_risk.record_trade(pnl_pct=pnl_pct)
