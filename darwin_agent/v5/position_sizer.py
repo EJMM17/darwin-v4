@@ -177,6 +177,7 @@ class PositionSizer:
         signal_confidence: float,
         current_exposure: float = 0.0,
         step_size: float = 0.0,
+        risk_pct_override: float = 0.0,
     ) -> SizeResult:
         """
         Compute position size for a new trade.
