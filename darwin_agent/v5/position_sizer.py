@@ -64,6 +64,7 @@ class SizeResult:
     notional: float = 0.0
     approved: bool = True
     rejection_reason: str = ""
+    notes: str = ""  # metadata adicional (ej. kelly_scale aplicado)
 
     def to_dict(self) -> Dict[str, Any]:
         return {

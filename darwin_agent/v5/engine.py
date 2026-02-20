@@ -432,7 +432,10 @@ class DarwinV5Engine:
                 if snap and snap.n_trades > 0:
                     logger.info(self._analytics.summary_line())
                     # Circuit breaker check (institutional risk controls)
-                    breached, reason = self._analytics.circuit_breaker_check()
+                    breached, reason = self._analytics.circuit_breaker_check(
+                            daily_pnl_usdt=self._state.daily_pnl,
+                            daily_start_equity=self._state.daily_start_equity,
+                        )
                     if breached:
                         logger.warning("CIRCUIT BREAKER: %s", reason)
             # Record equity for real-time Sharpe/Sortino/Calmar computation
@@ -644,7 +647,9 @@ class DarwinV5Engine:
             atr_pct = 0.0
             pos_regime = "trending"
             try:
-                feats = self._market_data.compute_features(symbol)
+                feats = await asyncio.to_thread(
+                    self._market_data.compute_features, symbol
+                )
                 if feats.atr_14 > 0 and feats.close > 0:
                     atr_pct = feats.atr_14 / feats.close
             except Exception:
@@ -720,12 +725,13 @@ class DarwinV5Engine:
             )
 
             if result.success:
-                pnl_usdt = pnl_pct * entry_price * close_qty
+                pnl_usdt = pnl_pct * entry_price * close_qty * cfg.leverage
                 self._position_sizer.record_trade_pnl(pnl_usdt)
                 self._state.trade_pnls.append(pnl_usdt)
                 # Feed trade to institutional performance analytics
                 self._analytics.record_trade(pnl_usdt=pnl_usdt, is_win=(pnl_usdt > 0))
                 self._portfolio_risk.record_trade(pnl_pct=pnl_pct)
+                self._state.daily_pnl += pnl_usdt
 
                 # ── Layer 3: Cooldown post-pérdida ────────────────────────
                 # If this was a stop loss (not TP or trailing), enforce cooldown
@@ -1007,6 +1013,8 @@ class DarwinV5Engine:
         )
 
         if result.success:
+            # Registrar tick del trade para el ranging throttle
+            self._state.last_trade_tick[symbol] = self._state.tick_count
             logger.info(
                 "order filled: %s %s qty=%.6f price=%.2f slippage=%.1fbps",
                 side, symbol, result.filled_qty, result.avg_price, result.slippage_bps,
