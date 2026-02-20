@@ -38,6 +38,10 @@ class TradeSignal:
     threshold: float = 0.0
     passed: bool = False
     rejection_reason: str = ""
+    # Order flow context (microstructure layer)
+    order_flow_score: float = 0.0      # -1 to +1, from OBI + TFD
+    is_fake_breakout: bool = False     # whale trap detected
+    fake_breakout_dir: str = ""        # direction of the trap
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -50,6 +54,8 @@ class TradeSignal:
             "threshold": round(self.threshold, 4),
             "passed": self.passed,
             "rejection_reason": self.rejection_reason,
+            "order_flow_score": round(self.order_flow_score, 4),
+            "is_fake_breakout": self.is_fake_breakout,
         }
 
 
@@ -103,6 +109,7 @@ class SignalGenerator:
         regime: RegimeState,
         btc_features: Optional[Any] = None,
         funding_rate: float = 0.0,
+        order_flow_ctx: Optional[Any] = None,
     ) -> TradeSignal:
         """
         Generate a trade signal for a symbol.
@@ -117,6 +124,10 @@ class SignalGenerator:
             BTC features for residual alpha computation.
         funding_rate : float
             Current funding rate for the symbol.
+        order_flow_ctx : OrderFlowContext, optional
+            Real-time microstructure analysis (OBI + TFD + fake breakout).
+            When provided, gates out whale manipulation and boosts confidence
+            when order flow confirms the signal direction.
 
         Returns
         -------
@@ -165,7 +176,44 @@ class SignalGenerator:
         # Confidence = absolute combined score, scaled to [0, 1]
         confidence = _sigmoid(abs(combined_score))
 
-        # Check threshold and regime gate
+        # ── Order Flow Intelligence layer ─────────────────────────────────
+        # Modulate confidence based on real-time microstructure:
+        #   • Fake breakout detected → block the signal entirely
+        #   • OFL confirms direction  → boost confidence up to +15%
+        #   • OFL opposes direction   → reduce confidence up to -20%
+        ofl_score = 0.0
+        is_fake = False
+        fake_dir = ""
+        if order_flow_ctx is not None and not order_flow_ctx.error:
+            ofl_score = order_flow_ctx.combined_score
+            is_fake = order_flow_ctx.is_fake_breakout
+            fake_dir = order_flow_ctx.fake_breakout_direction
+
+            if not is_fake and direction:
+                # Does order flow confirm or oppose the signal?
+                signal_bullish = direction == "LONG"
+                flow_bullish = ofl_score > 0
+                confirming = signal_bullish == flow_bullish
+
+                if confirming:
+                    # Boost: the stronger the confirmation, the bigger the boost
+                    boost = 0.15 * abs(ofl_score)
+                    confidence = min(0.99, confidence + boost)
+                    logger.debug(
+                        "%s order flow CONFIRMS %s (ofl=%.2f) → confidence +%.3f",
+                        symbol, direction, ofl_score, boost,
+                    )
+                else:
+                    # Oppose: reduce confidence, don't enter against order flow
+                    reduction = 0.20 * abs(ofl_score)
+                    confidence = max(0.0, confidence - reduction)
+                    logger.debug(
+                        "%s order flow OPPOSES %s (ofl=%.2f) → confidence -%.3f",
+                        symbol, direction, ofl_score, reduction,
+                    )
+        # ──────────────────────────────────────────────────────────────────
+
+        # Build signal
         signal = TradeSignal(
             symbol=symbol,
             direction=direction,
@@ -174,19 +222,45 @@ class SignalGenerator:
             factors=raw_factors,
             factor_z_scores=z_scores,
             threshold=cfg.confidence_threshold,
+            order_flow_score=ofl_score,
+            is_fake_breakout=is_fake,
+            fake_breakout_dir=fake_dir,
         )
 
-        # Gate checks
+        # Gate checks (regime-based)
         rejection = self._check_gates(signal, regime, features, cfg)
         if rejection:
             signal.passed = False
             signal.rejection_reason = rejection
-        else:
-            signal.passed = confidence >= cfg.confidence_threshold
-            if not signal.passed:
+            return signal
+
+        # Gate: fake breakout blocks the signal in the trap direction
+        if is_fake and direction:
+            trap_is_long = fake_dir == "UP"
+            signal_is_long = direction == "LONG"
+            if trap_is_long == signal_is_long:
+                signal.passed = False
                 signal.rejection_reason = (
-                    f"confidence {confidence:.3f} < threshold {cfg.confidence_threshold:.3f}"
+                    f"fake_breakout_{fake_dir.lower()}_detected "
+                    f"obi={order_flow_ctx.obi:.2f} "
+                    f"spike={order_flow_ctx.spike_ratio:.2f}x_atr"
                 )
+                logger.warning(
+                    "%s FAKE BREAKOUT %s blocked — "
+                    "obi=%.2f spike=%.2fx tfd=%.2f",
+                    symbol, fake_dir,
+                    order_flow_ctx.obi,
+                    order_flow_ctx.spike_ratio,
+                    order_flow_ctx.tfd,
+                )
+                return signal
+
+        # Final confidence threshold check
+        signal.passed = confidence >= cfg.confidence_threshold
+        if not signal.passed:
+            signal.rejection_reason = (
+                f"confidence {confidence:.3f} < threshold {cfg.confidence_threshold:.3f}"
+            )
 
         return signal
 

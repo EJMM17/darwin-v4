@@ -37,6 +37,7 @@ from darwin_agent.v5.execution_engine import (
 )
 from darwin_agent.v5.monte_carlo import MonteCarloValidator
 from darwin_agent.v5.portfolio_constructor import PortfolioConstructor
+from darwin_agent.v5.order_flow import OrderFlowIntelligence
 
 logger = logging.getLogger("darwin.v5.engine")
 
@@ -118,6 +119,7 @@ class DarwinV5Engine:
         self._market_data = MarketDataLayer(binance_client)
         self._regime_detector = RegimeDetector()
         self._signal_generator = SignalGenerator()
+        self._order_flow = OrderFlowIntelligence(binance_client)
         self._position_sizer = PositionSizer(SizerConfig(
             base_risk_pct=self._config.base_risk_pct,
             leverage=self._config.leverage,
@@ -486,10 +488,36 @@ class DarwinV5Engine:
             self._market_data.fetch_funding_rate, symbol
         )
 
-        # 4. Generate signal
-        signal = self._signal_generator.generate(
-            features, regime, btc_features, funding_rate
+        # 4. Order Flow Intelligence — fetch microstructure data in parallel
+        # Provides real-time OBI + trade flow delta + fake breakout detection.
+        # This runs as a separate thread to keep latency low.
+        prev_close = features.closes[-2] if len(features.closes) >= 2 else 0.0
+        order_flow_ctx = await asyncio.to_thread(
+            self._order_flow.analyze,
+            symbol,
+            features.close,
+            features.atr_14,
+            prev_close,
         )
+
+        if order_flow_ctx.error:
+            logger.debug("%s order flow error (continuing): %s", symbol, order_flow_ctx.error)
+
+        # 5. Generate signal (with order flow context)
+        signal = self._signal_generator.generate(
+            features, regime, btc_features, funding_rate, order_flow_ctx
+        )
+
+        # Log signal with order flow context
+        if order_flow_ctx and not order_flow_ctx.error:
+            logger.debug(
+                "%s ofl: obi=%.2f tfd=%.2f combined=%.2f fake=%s",
+                symbol,
+                order_flow_ctx.obi,
+                order_flow_ctx.tfd,
+                order_flow_ctx.combined_score,
+                order_flow_ctx.is_fake_breakout,
+            )
 
         # Log signal
         self._telemetry.log_signal_generated(
