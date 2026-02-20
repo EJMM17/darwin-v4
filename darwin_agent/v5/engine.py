@@ -70,6 +70,32 @@ class V5EngineConfig:
     # Kill switches institucionales
     max_daily_loss_pct: float = 5.0       # detener trading si perdemos >5% del equity en un día
     max_drawdown_kill_pct: float = 15.0   # halt total si drawdown supera 15% desde el pico
+
+    # ── Regime-adaptive thresholds ────────────────────────────────────────────
+    # En TRENDING: configuración normal de momentum.
+    # En RANGE_BOUND / LOW_VOL: más exigente, SL/TP ajustados, throttle de freq.
+
+    # Confianza mínima por régimen
+    confidence_threshold_trending: float = 0.60   # umbral en tendencia
+    confidence_threshold_ranging:  float = 0.78   # más exigente en lateral
+
+    # SL/TP por régimen
+    sl_pct_trending:  float = 1.5    # SL en tendencia (ratio 2:1)
+    tp_pct_trending:  float = 3.0    # TP en tendencia
+    sl_pct_ranging:   float = 0.7    # SL ajustado en lateral (ratio 1.5:1)
+    tp_pct_ranging:   float = 1.2    # TP pequeño pero alcanzable en lateral
+
+    # Frequency throttle: mínimo de ticks entre trades en lateral
+    # 120 ticks x 5s = 10 minutos entre trades por simbolo
+    ranging_trade_cooldown_ticks: int = 120
+
+    # ATR minimo para abrir trade (filtro de actividad)
+    # Si ATR < umbral, las fees erosionan el profit
+    min_atr_pct_to_trade: float = 0.25
+
+    # Leverage multiplier en lateral (reservado para uso futuro)
+    leverage_multiplier_ranging: float = 0.5
+
     # Mode
     dry_run: bool = False
     # Max retries before fatal
