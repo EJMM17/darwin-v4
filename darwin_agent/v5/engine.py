@@ -237,6 +237,7 @@ class DarwinV5Engine:
                     logger.warning("Failed to send daily report: %s", _e)
 
         self._state.daily_start_equity = self._state.equity
+        self._state.daily_pnl = 0.0
         self._state.open_positions = list(positions)
 
         if self._state.equity <= 0:
@@ -382,9 +383,15 @@ class DarwinV5Engine:
         today = datetime.datetime.now(datetime.timezone.utc).toordinal()
         if self._state.current_day != today:
             self._state.current_day = today
+            self._state.daily_start_equity = self._state.equity
+            self._state.daily_pnl = 0.0
             self._position_sizer.reset_daily(self._state.equity)
-            # Reset kill switch daily loss trigger (max drawdown halt persists)
-            if self._state.trading_halted and "daily_loss_limit" in self._state.halt_reason:
+            # Reset daily-scoped halts (max drawdown halt persists across days)
+            if self._state.trading_halted and (
+                "daily_loss_limit" in self._state.halt_reason
+                or "DAILY_LOSS_LIMIT" in self._state.halt_reason
+                or "LOSS_STREAK" in self._state.halt_reason
+            ):
                 self._state.trading_halted = False
                 self._state.halt_reason = ""
                 logger.info("KILL SWITCH reset: new trading day started")
@@ -407,7 +414,8 @@ class DarwinV5Engine:
                 "TRADING HALTED: %s | equity=$%.4f | daily_pnl=%.2f%%",
                 self._state.halt_reason,
                 self._state.equity,
-                self._state.daily_pnl / max(self._state.daily_start_equity, 1.0) * 100,
+                (self._state.equity - self._state.daily_start_equity)
+                / max(self._state.daily_start_equity, 1.0) * 100,
             )
         else:
             for symbol in self._config.symbols:
@@ -431,13 +439,23 @@ class DarwinV5Engine:
                 snap = self._analytics.snapshot()
                 if snap and snap.n_trades > 0:
                     logger.info(self._analytics.summary_line())
-                    # Circuit breaker check (institutional risk controls)
+                    # Circuit breaker: use equity-based daily PnL (includes unrealized)
+                    effective_daily_pnl = (
+                        self._state.equity - self._state.daily_start_equity
+                    )
                     breached, reason = self._analytics.circuit_breaker_check(
-                            daily_pnl_usdt=self._state.daily_pnl,
-                            daily_start_equity=self._state.daily_start_equity,
+                        daily_pnl_usdt=effective_daily_pnl,
+                        daily_start_equity=self._state.daily_start_equity,
+                    )
+                    if breached and not self._state.trading_halted:
+                        self._state.trading_halted = True
+                        self._state.halt_reason = f"circuit_breaker: {reason}"
+                        logger.critical("CIRCUIT BREAKER HALT: %s", reason)
+                        self._telegram.send_message(
+                            f"CIRCUIT BREAKER ACTIVATED: {reason}\n"
+                            f"Equity: ${self._state.equity:.2f}\n"
+                            f"Daily PnL: ${effective_daily_pnl:.2f}"
                         )
-                    if breached:
-                        logger.warning("CIRCUIT BREAKER: %s", reason)
             # Record equity for real-time Sharpe/Sortino/Calmar computation
             self._analytics.record_equity(self._state.equity)
             # Update portfolio risk daily equity (circuit breaker + Kelly)
@@ -652,8 +670,11 @@ class DarwinV5Engine:
                 )
                 if feats.atr_14 > 0 and feats.close > 0:
                     atr_pct = feats.atr_14 / feats.close
-            except Exception:
-                pass  # fallback to fixed SL
+            except Exception as exc:
+                logger.warning(
+                    "%s compute_features failed in SL/TP check, using fixed SL: %s",
+                    symbol, exc,
+                )
 
             # Detectar régimen de la posición para SL/TP adaptativos
             # (usamos el régimen actual del engine)
@@ -725,7 +746,9 @@ class DarwinV5Engine:
             )
 
             if result.success:
-                pnl_usdt = pnl_pct * entry_price * close_qty * cfg.leverage
+                # PnL = price_diff * qty. Leverage affects margin, not PnL.
+                # Position qty from exchange already reflects full notional.
+                pnl_usdt = pnl_pct * entry_price * close_qty
                 self._position_sizer.record_trade_pnl(pnl_usdt)
                 self._state.trade_pnls.append(pnl_usdt)
                 # Feed trade to institutional performance analytics
@@ -976,8 +999,9 @@ class DarwinV5Engine:
             signal_confidence=signal.confidence,
             current_exposure=current_exposure,
             step_size=self._symbol_step_sizes.get(symbol, 0.0),
-            # Pass Kelly-derived risk % override (replaces base_risk_pct for this trade)
             risk_pct_override=effective_risk_pct,
+            daily_pnl=self._state.daily_pnl,
+            daily_start_equity=self._state.daily_start_equity,
         )
 
         if not size_result.approved:
@@ -1012,9 +1036,10 @@ class DarwinV5Engine:
             order, dry_run=self._config.dry_run
         )
 
+        # Always record trade tick for throttle — prevents spam on repeated failures
+        self._state.last_trade_tick[symbol] = self._state.tick_count
+
         if result.success:
-            # Registrar tick del trade para el ranging throttle
-            self._state.last_trade_tick[symbol] = self._state.tick_count
             logger.info(
                 "order filled: %s %s qty=%.6f price=%.2f slippage=%.1fbps",
                 side, symbol, result.filled_qty, result.avg_price, result.slippage_bps,

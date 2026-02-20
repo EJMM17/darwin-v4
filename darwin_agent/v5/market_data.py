@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
@@ -91,6 +92,9 @@ class MarketDataLayer:
         self._cache_ttl_s = cache_ttl_s
         # Cache: (symbol, interval) -> (timestamp, candles)
         self._cache: Dict[Tuple[str, str], Tuple[float, List[OHLCV]]] = {}
+        # Thread safety: compute_features is called via asyncio.to_thread
+        # from multiple coroutines. requests.Session and cache dict need protection.
+        self._lock = threading.Lock()
 
     def fetch_candles(
         self,
@@ -106,46 +110,47 @@ class MarketDataLayer:
         cache_key = (symbol, interval)
         now = time.time()
 
-        # Check cache
-        if cache_key in self._cache:
-            ts, candles = self._cache[cache_key]
-            if now - ts < self._cache_ttl_s:
+        with self._lock:
+            # Check cache
+            if cache_key in self._cache:
+                ts, candles = self._cache[cache_key]
+                if now - ts < self._cache_ttl_s:
+                    return candles
+
+            # Fetch from exchange
+            try:
+                session = self._client._session
+                base_url = self._client._base_url
+                timeout = self._client._timeout_s
+
+                response = session.get(
+                    f"{base_url}/fapi/v1/klines",
+                    params={"symbol": symbol, "interval": interval, "limit": limit},
+                    timeout=timeout,
+                )
+                response.raise_for_status()
+                raw = response.json()
+
+                candles = []
+                for k in raw:
+                    candles.append(OHLCV(
+                        timestamp=int(k[0]),
+                        open=float(k[1]),
+                        high=float(k[2]),
+                        low=float(k[3]),
+                        close=float(k[4]),
+                        volume=float(k[5]),
+                    ))
+
+                self._cache[cache_key] = (now, candles)
                 return candles
 
-        # Fetch from exchange
-        try:
-            session = self._client._session
-            base_url = self._client._base_url
-            timeout = self._client._timeout_s
-
-            response = session.get(
-                f"{base_url}/fapi/v1/klines",
-                params={"symbol": symbol, "interval": interval, "limit": limit},
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            raw = response.json()
-
-            candles = []
-            for k in raw:
-                candles.append(OHLCV(
-                    timestamp=int(k[0]),
-                    open=float(k[1]),
-                    high=float(k[2]),
-                    low=float(k[3]),
-                    close=float(k[4]),
-                    volume=float(k[5]),
-                ))
-
-            self._cache[cache_key] = (now, candles)
-            return candles
-
-        except Exception as exc:
-            logger.warning("failed to fetch candles for %s: %s", symbol, exc)
-            # Return cached data if available (stale is better than nothing)
-            if cache_key in self._cache:
-                return self._cache[cache_key][1]
-            return []
+            except Exception as exc:
+                logger.warning("failed to fetch candles for %s: %s", symbol, exc)
+                # Return cached data if available (stale is better than nothing)
+                if cache_key in self._cache:
+                    return self._cache[cache_key][1]
+                return []
 
     def fetch_funding_rate(self, symbol: str) -> float:
         """Fetch the current funding rate for a symbol."""
