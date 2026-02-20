@@ -43,6 +43,12 @@ class SizerConfig:
     max_total_exposure_mult: float = 5.0  # max 5x leverage total
     # Min notional
     min_notional_usdt: float = 5.5      # Binance min es $5, +$0.5 de margen por slippage
+    # Half-Kelly adaptive sizing
+    use_kelly: bool = True              # activar Kelly scaling basado en historial de trades
+    kelly_fraction: float = 0.5         # usar half-Kelly (más conservador que Kelly completo)
+    kelly_lookback: int = 30            # número de trades históricos para estimar Kelly
+    kelly_min: float = 0.5             # escalar mínimo del Kelly (no bajar más del 50%)
+    kelly_max: float = 1.5             # escalar máximo del Kelly (no subir más del 150%)
 
 
 @dataclass(slots=True)
@@ -96,15 +102,70 @@ class PositionSizer:
         self._daily_pnl: float = 0.0
         self._daily_start_equity: float = 0.0
         self._current_day: int = -1
+        self._trade_pnls: list = []      # historial completo de PnL para Kelly Criterion
 
     def reset_daily(self, equity: float) -> None:
         """Reset daily P&L tracking (call at start of each day)."""
         self._daily_pnl = 0.0
         self._daily_start_equity = equity
 
+
+    def _compute_kelly_scale(self, cfg: SizerConfig) -> float:
+        """
+        Compute half-Kelly position scaling factor from recent trade history.
+
+        Kelly Criterion (Thorp 2006):
+            K% = W - (1 - W) / R
+        where:
+            W = win rate (fraction of profitable trades)
+            R = avg_win / avg_loss (reward-to-risk ratio)
+
+        We use fractional Kelly (cfg.kelly_fraction, default 0.5) to reduce
+        variance while preserving most of the long-term growth benefit.
+        A full-Kelly system has ~2x the volatility of half-Kelly with only
+        ~30% more return — not worth it for institutional capital preservation.
+
+        Returns a scaling factor clamped to [kelly_min, kelly_max].
+        Returns 1.0 (no adjustment) if insufficient data or poor statistics.
+        """
+        recent = self._trade_pnls[-cfg.kelly_lookback:]
+        wins = [p for p in recent if p > 0]
+        losses = [p for p in recent if p < 0]
+
+        if len(wins) < 3 or len(losses) < 3:
+            return 1.0  # insufficient sample — no Kelly adjustment
+
+        win_rate = len(wins) / len(recent)
+        avg_win = sum(wins) / len(wins)
+        avg_loss = abs(sum(losses) / len(losses))
+
+        if avg_loss < 1e-8:
+            return 1.0
+
+        reward_to_risk = avg_win / avg_loss
+        kelly_full = win_rate - (1.0 - win_rate) / reward_to_risk
+
+        if kelly_full <= 0:
+            # Negative Kelly = strategy has no edge right now → scale down
+            return cfg.kelly_min
+
+        kelly_fractional = kelly_full * cfg.kelly_fraction
+
+        # Map Kelly fraction to a position scaling factor around 1.0
+        # kelly_fractional = 1.0 means "bet 100% of capital per trade" (too large)
+        # We normalize so that kelly_fractional = 0.02 (2% risk) → scale = 1.0
+        base_risk = max(cfg.base_risk_pct / 100.0, 1e-8)
+        scale = kelly_fractional / base_risk
+
+        return max(cfg.kelly_min, min(cfg.kelly_max, scale))
+
     def record_trade_pnl(self, pnl: float) -> None:
-        """Record a closed trade's P&L for daily loss tracking."""
+        """Record a closed trade's P&L for daily loss and Kelly tracking."""
         self._daily_pnl += pnl
+        self._trade_pnls.append(pnl)
+        # Cap history to 200 trades (memory efficiency)
+        if len(self._trade_pnls) > 200:
+            self._trade_pnls = self._trade_pnls[-200:]
 
     def compute(
         self,
@@ -159,8 +220,8 @@ class PositionSizer:
             result.rejection_reason = "price <= 0"
             return result
 
-        # 1. Base size
-        base_risk_pct = cfg.base_risk_pct / 100.0
+        # 1. Base size — use Half-Kelly from PortfolioRiskManager if available
+        base_risk_pct = (risk_pct_override / 100.0) if risk_pct_override > 0 else (cfg.base_risk_pct / 100.0)
         base_size = equity * base_risk_pct * cfg.leverage
 
         # 2. Volatility scaling: inversely proportional to realized vol
@@ -202,6 +263,14 @@ class PositionSizer:
             result.approved = False
             result.rejection_reason = "total_exposure_cap_reached"
             return result
+
+        # 7. Half-Kelly adaptive scaling (Thorp 2006 / QuantStart institutional)
+        # Scales position proportionally to the strategy's recent edge.
+        # Half-Kelly (fraction=0.5) gives ~75% of full Kelly growth with ~50% variance.
+        if cfg.use_kelly and len(self._trade_pnls) >= cfg.kelly_lookback:
+            kelly_scale = self._compute_kelly_scale(cfg)
+            position_size *= kelly_scale
+            result.notes = getattr(result, "notes", "") + f" kelly_scale={kelly_scale:.3f}"
         position_size = min(position_size, max_additional)
 
         # Halted by drawdown

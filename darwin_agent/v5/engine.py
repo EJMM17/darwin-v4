@@ -38,6 +38,8 @@ from darwin_agent.v5.execution_engine import (
 from darwin_agent.v5.monte_carlo import MonteCarloValidator
 from darwin_agent.v5.portfolio_constructor import PortfolioConstructor
 from darwin_agent.v5.order_flow import OrderFlowIntelligence
+from darwin_agent.v5.performance_analytics import PerformanceAnalytics
+from darwin_agent.v5.portfolio_risk import PortfolioRiskManager, PortfolioRiskConfig
 
 logger = logging.getLogger("darwin.v5.engine")
 
@@ -65,6 +67,9 @@ class V5EngineConfig:
     trailing_distance_pct: float = 0.8    # trailing a 0.8% debajo del máximo
     # Cooldown post-pérdida: evita re-entrar inmediatamente después de un stop
     post_loss_cooldown_ticks: int = 6     # esperar 6 ticks (~30s) tras un SL
+    # Kill switches institucionales
+    max_daily_loss_pct: float = 5.0       # detener trading si perdemos >5% del equity en un día
+    max_drawdown_kill_pct: float = 15.0   # halt total si drawdown supera 15% desde el pico
     # Mode
     dry_run: bool = False
     # Max retries before fatal
@@ -92,6 +97,9 @@ class V5EngineState:
     cooldown_until: dict = field(default_factory=dict)
     # Trailing stop tracking: symbol -> peak_pnl_pct seen so far
     trailing_peaks: dict = field(default_factory=dict)
+    # Kill switch state
+    trading_halted: bool = False
+    halt_reason: str = ""
 
 
 class DarwinV5Engine:
@@ -131,6 +139,8 @@ class DarwinV5Engine:
         self._regime_detector = RegimeDetector()
         self._signal_generator = SignalGenerator()
         self._order_flow = OrderFlowIntelligence(binance_client)
+        self._analytics = PerformanceAnalytics()
+        self._portfolio_risk = PortfolioRiskManager(PortfolioRiskConfig())
         self._position_sizer = PositionSizer(SizerConfig(
             base_risk_pct=self._config.base_risk_pct,
             leverage=self._config.leverage,
@@ -188,6 +198,16 @@ class DarwinV5Engine:
         self._state.unrealized_pnl = float(upnl)
         self._state.equity = self._state.wallet_balance + self._state.unrealized_pnl
         self._state.peak_equity = self._state.equity
+        # Send daily performance report before resetting (except on first run)
+        if self._state.daily_start_equity > 0:
+            perf = self._analytics.get_report()
+            if perf and perf.total_trades > 0:
+                try:
+                    self._telegram.send_message(perf.to_telegram())
+                    logger.info("Daily performance report sent to Telegram")
+                except Exception as _e:
+                    logger.warning("Failed to send daily report: %s", _e)
+
         self._state.daily_start_equity = self._state.equity
         self._state.open_positions = list(positions)
 
@@ -335,6 +355,13 @@ class DarwinV5Engine:
         if self._state.current_day != today:
             self._state.current_day = today
             self._position_sizer.reset_daily(self._state.equity)
+            # Reset kill switch daily loss trigger (max drawdown halt persists)
+            if self._state.trading_halted and "daily_loss_limit" in self._state.halt_reason:
+                self._state.trading_halted = False
+                self._state.halt_reason = ""
+                logger.info("KILL SWITCH reset: new trading day started")
+            # Export equity curve CSV at day rollover (institutional audit trail)
+            self._export_equity_csv()
             logger.info("daily reset: new equity baseline $%.4f", self._state.equity)
 
         # 2. Manage open positions (SL/TP check) BEFORE new signals
@@ -345,8 +372,18 @@ class DarwinV5Engine:
             self._market_data.compute_features, "BTCUSDT"
         )
 
-        for symbol in self._config.symbols:
-            await self._process_symbol(symbol, btc_features)
+        # 3b. Kill switch: verificar límites de pérdida antes de abrir nuevas posiciones
+        await self._check_kill_switches()
+        if self._state.trading_halted:
+            logger.warning(
+                "TRADING HALTED: %s | equity=$%.4f | daily_pnl=%.2f%%",
+                self._state.halt_reason,
+                self._state.equity,
+                self._state.daily_pnl / max(self._state.daily_start_equity, 1.0) * 100,
+            )
+        else:
+            for symbol in self._config.symbols:
+                await self._process_symbol(symbol, btc_features)
 
         # 4. Heartbeat logging
         if tick - self._state.last_heartbeat_tick >= self._config.heartbeat_interval_ticks:
@@ -359,6 +396,31 @@ class DarwinV5Engine:
                 regime=self._state.current_regime,
                 drawdown_pct=self._state.drawdown_pct,
             )
+            # Feed equity snapshot to performance analytics (institutional metrics)
+            self._analytics.record_equity(self._state.equity)
+            # Log live metrics every 5 minutes (every 5 heartbeats at 12 ticks/heartbeat)
+            if tick % (self._config.heartbeat_interval_ticks * 5) == 0:
+                report = self._analytics.get_report()
+                if report:
+                    logger.info(
+                        "PERF | Sharpe=%.2f(%s) Sortino=%.2f(%s) Calmar=%.2f(%s) "
+                        "DD=%.1f%% WinRate=%.1f%% PF=%.2f Trades=%d",
+                        report.sharpe_ratio, report.sharpe_grade(),
+                        report.sortino_ratio, report.sortino_grade(),
+                        report.calmar_ratio, report.calmar_grade(),
+                        report.max_drawdown_pct,
+                        report.win_rate_pct,
+                        report.profit_factor,
+                        report.total_trades,
+                    )
+            # Record equity for real-time Sharpe/Sortino/Calmar computation
+            self._analytics.record_equity(self._state.equity)
+            # Update portfolio risk daily equity (circuit breaker + Kelly)
+            self._portfolio_risk.update_daily_equity(self._state.equity)
+            # Log performance metrics every heartbeat (60s)
+            perf = self._analytics.get_report()
+            if perf:
+                logger.info(perf.to_log())
 
         # 5. Periodic Monte Carlo validation
         if (
@@ -384,6 +446,140 @@ class DarwinV5Engine:
             self._state.current_regime,
         )
 
+
+
+
+    def _export_equity_csv(self) -> None:
+        """
+        Export equity curve and trade history to CSV for institutional audit trail.
+
+        Files written to /data/analytics/ (Docker volume):
+          equity_curve_YYYY-MM-DD.csv   — timestamp, equity per heartbeat
+          trade_history_YYYY-MM-DD.csv  — all closed trades with PnL
+
+        These CSVs allow:
+          - Independent auditor verification of performance claims
+          - Backtesting ground truth comparison
+          - Investor reporting automation
+          - Regulatory compliance documentation
+        """
+        import csv
+        import os
+        import datetime as _dt
+
+        report = self._analytics.get_report()
+        if not report:
+            return
+
+        today_str = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+        out_dir = "/data/analytics"
+        os.makedirs(out_dir, exist_ok=True)
+
+        # Equity curve
+        eq_path = f"{out_dir}/equity_curve_{today_str}.csv"
+        try:
+            with open(eq_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["timestamp_utc", "equity_usdt"])
+                for ep in self._analytics._equity_series:
+                    ts_str = _dt.datetime.utcfromtimestamp(ep.ts).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    writer.writerow([ts_str, f"{ep.equity:.4f}"])
+            logger.info("equity curve exported: %s (%d rows)", eq_path, len(self._analytics._equity_series))
+        except Exception as exc:
+            logger.warning("equity CSV export failed: %s", exc)
+
+        # Trade history
+        trades_path = f"{out_dir}/trade_history_{today_str}.csv"
+        try:
+            with open(trades_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["timestamp_utc", "pnl_usdt", "pnl_pct"])
+                for tr in self._analytics._trades:
+                    ts_str = _dt.datetime.utcfromtimestamp(tr.ts).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    writer.writerow([ts_str, f"{tr.pnl_usdt:.4f}", f"{tr.pnl_pct*100:.4f}"])
+            logger.info("trade history exported: %s (%d trades)", trades_path, len(self._analytics._trades))
+        except Exception as exc:
+            logger.warning("trade history CSV export failed: %s", exc)
+
+        # Summary metrics to log
+        if report.total_trades >= 5:
+            logger.info(
+                "DAILY REPORT | Return=%.2f%% Sharpe=%.2f Sortino=%.2f Calmar=%.2f "
+                "MaxDD=%.1f%% WinRate=%.1f%% PF=%.2f | Grade=%s",
+                report.total_return_pct,
+                report.sharpe_ratio, report.sortino_ratio, report.calmar_ratio,
+                report.max_drawdown_pct, report.win_rate_pct, report.profit_factor,
+                report.overall_grade(),
+            )
+
+    async def _check_kill_switches(self) -> None:
+        """
+        Institutional kill switches: halt trading if risk limits are breached.
+
+        Two independent triggers (AIMA crypto hedge fund standards 2025):
+
+        1. Daily Loss Limit: if we lose > max_daily_loss_pct of the day's
+           opening equity, halt trading for the rest of the calendar day.
+           Prevents runaway losses during adverse market conditions.
+           Resets automatically on next daily_reset.
+
+        2. Max Drawdown Halt: if peak-to-trough drawdown exceeds
+           max_drawdown_kill_pct, halt trading entirely and require manual
+           restart. This protects capital at the portfolio level and
+           prevents the bot from trading through a strategy failure.
+        """
+        if self._state.trading_halted:
+            return  # already halted
+
+        cfg = self._config
+        equity = self._state.equity
+        daily_start = self._state.daily_start_equity
+
+        # ── Trigger 1: Daily loss limit ──────────────────────────────────
+        if daily_start > 0:
+            daily_loss_pct = (daily_start - equity) / daily_start * 100.0
+            if daily_loss_pct >= cfg.max_daily_loss_pct:
+                self._state.trading_halted = True
+                self._state.halt_reason = (
+                    f"daily_loss_limit_breached: -{daily_loss_pct:.2f}% "
+                    f"(limit={cfg.max_daily_loss_pct}%)"
+                )
+                self._telegram.send_message(
+                    f"🚨 KILL SWITCH ACTIVADO — Daily Loss Limit\n"
+                    f"Pérdida del día: -{daily_loss_pct:.2f}%\n"
+                    f"Límite configurado: {cfg.max_daily_loss_pct}%\n"
+                    f"Trading suspendido hasta el próximo día UTC.\n"
+                    f"Equity actual: ${equity:.2f}"
+                )
+                logger.critical(
+                    "KILL SWITCH: daily loss limit breached %.2f%% (limit=%.1f%%)",
+                    daily_loss_pct, cfg.max_daily_loss_pct,
+                )
+                return
+
+        # ── Trigger 2: Max drawdown from peak ────────────────────────────
+        if self._state.peak_equity > 0:
+            drawdown_pct = (
+                (self._state.peak_equity - equity) / self._state.peak_equity * 100.0
+            )
+            if drawdown_pct >= cfg.max_drawdown_kill_pct:
+                self._state.trading_halted = True
+                self._state.halt_reason = (
+                    f"max_drawdown_breached: -{drawdown_pct:.2f}% from peak "
+                    f"(limit={cfg.max_drawdown_kill_pct}%)"
+                )
+                self._telegram.send_message(
+                    f"🚨 KILL SWITCH ACTIVADO — Max Drawdown\n"
+                    f"Drawdown desde el pico: -{drawdown_pct:.2f}%\n"
+                    f"Límite configurado: {cfg.max_drawdown_kill_pct}%\n"
+                    f"Trading suspendido. Requiere reinicio manual.\n"
+                    f"Peak equity: ${self._state.peak_equity:.2f}\n"
+                    f"Equity actual: ${equity:.2f}"
+                )
+                logger.critical(
+                    "KILL SWITCH: max drawdown breached %.2f%% from peak $%.2f (limit=%.1f%%)",
+                    drawdown_pct, self._state.peak_equity, cfg.max_drawdown_kill_pct,
+                )
 
     async def _manage_open_positions(self, positions: list) -> None:
         """
@@ -502,6 +698,11 @@ class DarwinV5Engine:
                 pnl_usdt = pnl_pct * entry_price * close_qty
                 self._position_sizer.record_trade_pnl(pnl_usdt)
                 self._state.trade_pnls.append(pnl_usdt)
+                # Feed trade to institutional performance analytics
+                self._analytics.record_trade(pnl_usdt=pnl_usdt, pnl_pct=pnl_pct)
+                # Institutional metrics + Kelly calibration
+                self._analytics.record_trade(pnl_usdt=pnl_usdt, pnl_pct=pnl_pct)
+                self._portfolio_risk.record_trade(pnl_pct=pnl_pct)
 
                 # ── Layer 3: Cooldown post-pérdida ────────────────────────
                 # If this was a stop loss (not TP or trailing), enforce cooldown
@@ -623,7 +824,36 @@ class DarwinV5Engine:
             logger.debug("%s in cooldown — %d ticks remaining", symbol, remaining)
             return
 
-        # 7. Position sizing
+        # 7. Position sizing — with Half-Kelly + Portfolio Risk checks
+
+        # Update price history for correlation filter
+        self._portfolio_risk.update_price(symbol, features.close)
+
+        # Estimate proposed notional for heat check (before exact sizing)
+        equity = self._state.equity
+        base_risk_pct = self._config.base_risk_pct / 100.0
+        estimated_notional = equity * base_risk_pct * self._config.leverage
+
+        # Portfolio risk check: heat, correlation, circuit breaker
+        risk_check = self._portfolio_risk.check_new_position(
+            symbol=symbol,
+            equity=equity,
+            price=features.close,
+            proposed_notional=estimated_notional,
+            open_positions=self._state.open_positions,
+        )
+
+        if not risk_check.approved:
+            logger.debug(
+                "portfolio_risk REJECTED %s: %s",
+                symbol, risk_check.rejection_reason,
+            )
+            return
+
+        # Use Kelly risk % if available, otherwise fallback to config
+        kelly_risk_pct = risk_check.kelly_risk_pct
+        effective_risk_pct = kelly_risk_pct * risk_check.sizing_multiplier
+
         current_exposure = sum(
             abs(float(p.get("notional", 0)))
             for p in self._state.open_positions
@@ -638,6 +868,8 @@ class DarwinV5Engine:
             signal_confidence=signal.confidence,
             current_exposure=current_exposure,
             step_size=self._symbol_step_sizes.get(symbol, 0.0),
+            # Pass Kelly-derived risk % override (replaces base_risk_pct for this trade)
+            risk_pct_override=effective_risk_pct,
         )
 
         if not size_result.approved:
@@ -649,6 +881,13 @@ class DarwinV5Engine:
                 details=size_result.to_dict(),
             )
             return
+
+        # Log portfolio heat and Kelly info
+        logger.debug(
+            "%s approved: kelly_risk=%.2f%% cb_level=%d heat=%.1f%% mult=%.2f",
+            symbol, kelly_risk_pct, risk_check.circuit_level,
+            risk_check.portfolio_heat_pct, risk_check.sizing_multiplier,
+        )
 
         # 8. Build order
         side = "BUY" if signal.direction == "LONG" else "SELL"
