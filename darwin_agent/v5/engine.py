@@ -725,8 +725,6 @@ class DarwinV5Engine:
                 self._state.trade_pnls.append(pnl_usdt)
                 # Feed trade to institutional performance analytics
                 self._analytics.record_trade(pnl_usdt=pnl_usdt, is_win=(pnl_usdt > 0))
-                # Institutional metrics + Kelly calibration
-                self._analytics.record_trade(pnl_usdt=pnl_usdt, pnl_pct=pnl_pct)
                 self._portfolio_risk.record_trade(pnl_pct=pnl_pct)
 
                 # ── Layer 3: Cooldown post-pérdida ────────────────────────
