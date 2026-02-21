@@ -1,0 +1,45 @@
+{
+  "initial_equity": 200.0,
+  "final_equity": 198.3641489294882,
+  "total_pnl": -1.63585107051188,
+  "total_return_pct": -0.8179255352558954,
+  "max_drawdown_pct": 1.2106650857407066,
+  "sharpe": -2.837576100973724,
+  "sortino": -2.3077263081794257,
+  "calmar": -0.6756001679485734,
+  "profit_factor": 0.7847858347213186,
+  "total_trades": 150,
+  "win_rate": 0.43333333333333335,
+  "avg_win": 0.09177210818664029,
+  "avg_loss": -0.0894239776781588,
+  "expectancy": -0.010905673803412529,
+  "max_win_streak": 5,
+  "max_loss_streak": 9,
+  "grade": "F",
+  "scalable": false,
+  "symbol_stats": {
+    "BTCUSDT": {
+      "trades": 12,
+      "wins": 11,
+      "win_rate": 91.66666666666666,
+      "pnl": 0.7244249168051443
+    },
+    "ETHUSDT": {
+      "trades": 46,
+      "wins": 13,
+      "win_rate": 28.26086956521739,
+      "pnl": -1.6531646653133933
+    },
+    "SOLUSDT": {
+      "trades": 92,
+      "wins": 41,
+      "win_rate": 44.565217391304344,
+      "pnl": -0.7071113220036302
+    }
+  },
+  "reason_counts": {
+    "TRAILING_STOP": 32,
+    "STOP_LOSS": 85,
+    "TAKE_PROFIT": 33
+  }
+}
