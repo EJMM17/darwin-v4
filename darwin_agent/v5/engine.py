@@ -41,6 +41,7 @@ from darwin_agent.v5.portfolio_constructor import PortfolioConstructor
 from darwin_agent.v5.order_flow import OrderFlowIntelligence
 from darwin_agent.v5.performance_analytics import PerformanceAnalytics
 from darwin_agent.v5.portfolio_risk import PortfolioRiskManager, PortfolioRiskConfig
+from darwin_agent.v5.visa_order_manager import VISAOrderManager
 
 logger = logging.getLogger("darwin.v5.engine")
 
@@ -96,6 +97,10 @@ class V5EngineConfig:
 
     # Leverage multiplier en lateral (reservado para uso futuro)
     leverage_multiplier_ranging: float = 0.5
+
+    # Server-side orders (VISA)
+    visa_enabled: bool = True            # place SL/TP on Binance matching engine
+    visa_audit_interval_ticks: int = 12  # audit server-side orders every 60s (at 5s tick)
 
     # Mode
     dry_run: bool = False
@@ -205,6 +210,8 @@ class DarwinV5Engine:
         self._symbol_step_sizes: Dict[str, float] = {}  # populated on startup
         self._monte_carlo = MonteCarloValidator()
         self._portfolio = PortfolioConstructor(self._config.symbols)
+        # VISA: server-side protective orders
+        self._visa = VISAOrderManager(binance_client) if self._config.visa_enabled else None
 
         # State
         self._state = V5EngineState()
@@ -287,6 +294,18 @@ class DarwinV5Engine:
             logger.info("symbol step sizes loaded: %s", step_sizes)
         except Exception as exc:
             logger.warning("could not load symbol step sizes, using defaults: %s", exc)
+
+        # 6. Load symbol price/quantity filters for VISA order formatting
+        try:
+            await asyncio.to_thread(
+                self._binance.load_symbol_filters, self._config.symbols
+            )
+        except Exception as exc:
+            logger.warning("could not load symbol filters for VISA: %s", exc)
+
+        # 7. Sync VISA with existing positions (re-place server-side orders if missing)
+        if self._visa and positions:
+            await self._visa_sync_existing_positions(positions)
 
         startup = {
             "wallet_balance": self._state.wallet_balance,
@@ -488,6 +507,14 @@ class DarwinV5Engine:
             perf = self._analytics.get_report()
             if perf:
                 logger.info(perf.to_log())
+
+        # 4b. VISA audit: verify server-side protective orders still exist
+        if (
+            self._visa
+            and not self._config.dry_run
+            and tick % self._config.visa_audit_interval_ticks == 0
+        ):
+            await self._visa_audit(positions)
 
         # 5. Periodic Monte Carlo validation
         if (
@@ -743,11 +770,46 @@ class DarwinV5Engine:
             elif pnl_pct >= tp_pct:
                 close_reason = f"TAKE_PROFIT ({pnl_pct*100:.2f}%)"
 
+            # VISA: Update server-side SL for trailing stop
+            if (
+                self._visa
+                and not self._config.dry_run
+                and trail_sl is not None
+                and trail_sl > 0
+                and cfg.trailing_stop_enabled
+            ):
+                pair = self._visa.active_orders.get(symbol)
+                if pair and is_long and trail_sl > 0:
+                    # For LONG: trailing SL is below current price
+                    new_sl_abs = entry_price * (1.0 - (new_peak - cfg.trailing_distance_pct / 100.0))
+                    # Only move SL up (tighter), never down
+                    if new_sl_abs > pair.sl_price:
+                        await asyncio.to_thread(
+                            self._visa.update_sl_price, symbol, new_sl_abs
+                        )
+                elif pair and not is_long and trail_sl > 0:
+                    # For SHORT: trailing SL is above current price
+                    new_sl_abs = entry_price * (1.0 + (new_peak - cfg.trailing_distance_pct / 100.0))
+                    # Only move SL down (tighter), never up
+                    if new_sl_abs < pair.sl_price:
+                        await asyncio.to_thread(
+                            self._visa.update_sl_price, symbol, new_sl_abs
+                        )
+
             if not close_reason:
                 continue
 
             # Clean up trailing peak for this symbol
             self._state.trailing_peaks.pop(symbol, None)
+
+            # VISA: Cancel server-side protective orders before closing
+            if self._visa and not self._config.dry_run:
+                try:
+                    await asyncio.to_thread(
+                        self._visa.cancel_protective_orders, symbol
+                    )
+                except Exception as ve:
+                    logger.warning("VISA cancel failed for %s before close: %s", symbol, ve)
 
             # Close position: opposite side, reduceOnly
             close_side = "SELL" if is_long else "BUY"
@@ -804,9 +866,38 @@ class DarwinV5Engine:
                     symbol, pnl_usdt, pnl_pct * 100.0, close_reason,
                 )
             else:
+                # Normal close failed — use emergency close with aggressive retry
                 logger.error(
-                    "FAILED to close position %s: %s", symbol, result.error
+                    "FAILED to close position %s: %s — attempting emergency close",
+                    symbol, result.error,
                 )
+                if not cfg.dry_run:
+                    try:
+                        await asyncio.to_thread(
+                            self._binance.emergency_close_position,
+                            symbol, close_side, close_qty,
+                        )
+                        pnl_usdt = pnl_pct * entry_price * close_qty
+                        self._position_sizer.record_trade_pnl(pnl_usdt)
+                        self._state.trade_pnls.append(pnl_usdt)
+                        self._analytics.record_trade(pnl_usdt=pnl_usdt, is_win=(pnl_usdt > 0))
+                        self._portfolio_risk.record_trade(pnl_pct=pnl_pct)
+                        self._state.daily_pnl += pnl_usdt
+                        logger.warning(
+                            "EMERGENCY CLOSE succeeded for %s pnl=%.4f",
+                            symbol, pnl_usdt,
+                        )
+                    except Exception as emg_exc:
+                        logger.critical(
+                            "EMERGENCY CLOSE FAILED for %s: %s — server-side SL is last defense",
+                            symbol, emg_exc,
+                        )
+                        self._telegram.send_message(
+                            f"CRITICAL: Cannot close {symbol} position.\n"
+                            f"Normal close error: {result.error}\n"
+                            f"Emergency close error: {emg_exc}\n"
+                            f"Server-side SL is the only remaining protection."
+                        )
 
     async def _process_symbol(self, symbol: str, btc_features: Any) -> None:
         """Process one symbol through the full pipeline."""
@@ -1074,6 +1165,17 @@ class DarwinV5Engine:
                 "order filled: %s %s qty=%.6f price=%.2f slippage=%.1fbps",
                 side, symbol, result.filled_qty, result.avg_price, result.slippage_bps,
             )
+
+            # VISA: Place server-side SL/TP immediately after fill
+            if self._visa and not self._config.dry_run and result.avg_price > 0:
+                await self._visa_place_after_fill(
+                    symbol=symbol,
+                    direction=signal.direction,
+                    entry_price=result.avg_price,
+                    quantity=result.filled_qty,
+                    features=features,
+                    regime=regime,
+                )
         else:
             # Throttle on permanent rejections (insufficient margin, validation)
             # but NOT on transient network errors — those shouldn't block the
@@ -1087,9 +1189,233 @@ class DarwinV5Engine:
                 self._state.last_trade_tick[symbol] = self._state.tick_count
             logger.warning("order failed: %s %s error=%s transient=%s", side, symbol, result.error, is_transient)
 
+    # ── VISA Server-Side Order Helpers ──────────────────────────
+
+    async def _visa_place_after_fill(
+        self,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        quantity: float,
+        features: Any,
+        regime: Any,
+    ) -> None:
+        """
+        Place server-side SL + TP immediately after a fill.
+
+        Computes SL/TP prices using the same logic as _manage_open_positions
+        to ensure consistency between client-side and server-side levels.
+        """
+        cfg = self._config
+        is_ranging = regime.regime.value in ("range_bound", "low_vol")
+
+        # ATR-based dynamic SL (same logic as _manage_open_positions)
+        atr_pct = 0.0
+        if features.atr_14 > 0 and features.close > 0:
+            atr_pct = features.atr_14 / features.close
+
+        if is_ranging:
+            sl_floor = cfg.sl_pct_ranging / 100.0
+            tp_pct = cfg.tp_pct_ranging / 100.0
+        else:
+            sl_floor = cfg.sl_pct_trending / 100.0
+            tp_pct = cfg.tp_pct_trending / 100.0
+
+        sl_pct = max(sl_floor, cfg.atr_sl_multiplier * atr_pct)
+
+        # Compute absolute prices
+        if direction == "LONG":
+            sl_price = entry_price * (1.0 - sl_pct)
+            tp_price = entry_price * (1.0 + tp_pct)
+        else:
+            sl_price = entry_price * (1.0 + sl_pct)
+            tp_price = entry_price * (1.0 - tp_pct)
+
+        try:
+            pair = await asyncio.to_thread(
+                self._visa.place_protective_orders,
+                symbol, direction, entry_price, sl_price, tp_price, quantity,
+            )
+            logger.info(
+                "VISA: %s %s protected — SL=%.4f TP=%.4f (sl_pct=%.2f%% tp_pct=%.2f%%)",
+                symbol, direction, sl_price, tp_price, sl_pct * 100, tp_pct * 100,
+            )
+        except RuntimeError as exc:
+            # SL placement failed — this is critical
+            # The position is OPEN without server-side protection
+            # Try emergency close immediately
+            logger.critical(
+                "VISA SL placement failed for %s — attempting emergency close: %s",
+                symbol, exc,
+            )
+            self._telegram.send_message(
+                f"CRITICAL: Server-side SL failed for {symbol}.\n"
+                f"Entry: {entry_price:.4f} | Direction: {direction}\n"
+                f"Attempting emergency close to protect capital."
+            )
+            try:
+                close_side = "SELL" if direction == "LONG" else "BUY"
+                await asyncio.to_thread(
+                    self._binance.emergency_close_position,
+                    symbol, close_side, quantity,
+                )
+                logger.warning(
+                    "VISA: emergency close succeeded for %s after SL placement failure",
+                    symbol,
+                )
+            except Exception as close_exc:
+                logger.critical(
+                    "VISA: EMERGENCY CLOSE ALSO FAILED for %s — MANUAL INTERVENTION REQUIRED: %s",
+                    symbol, close_exc,
+                )
+                self._telegram.send_message(
+                    f"EMERGENCY: Both SL placement and emergency close FAILED for {symbol}.\n"
+                    f"MANUAL INTERVENTION REQUIRED.\n"
+                    f"Position: {direction} qty={quantity} entry={entry_price}"
+                )
+
+    async def _visa_audit(self, positions: list) -> None:
+        """
+        Periodic audit of server-side orders.
+
+        Detects:
+        1. Missing SL/TP orders → re-place them
+        2. Server-side SL/TP that filled → record the trade
+        """
+        if not self._visa:
+            return
+
+        open_symbols = [
+            pos.get("symbol", "")
+            for pos in positions
+            if float(pos.get("positionAmt", 0.0)) != 0.0
+        ]
+
+        try:
+            audit = await asyncio.to_thread(
+                self._visa.audit_orders, open_symbols
+            )
+        except Exception as exc:
+            logger.warning("VISA audit failed: %s", exc)
+            return
+
+        # Handle server-side SL fills (position was closed by the exchange)
+        for symbol in audit.sl_filled:
+            logger.warning(
+                "VISA: server-side SL triggered for %s — syncing state",
+                symbol,
+            )
+            self._visa.cancel_protective_orders(symbol)
+            self._telegram.send_message(
+                f"Server-side STOP LOSS triggered for {symbol}.\n"
+                f"Position was closed by Binance matching engine."
+            )
+
+        # Handle server-side TP fills
+        for symbol in audit.tp_filled:
+            logger.info(
+                "VISA: server-side TP triggered for %s — syncing state",
+                symbol,
+            )
+            self._visa.cancel_protective_orders(symbol)
+
+        # Re-place missing SL orders (critical)
+        for symbol in audit.sl_missing:
+            if symbol not in open_symbols:
+                continue
+            logger.critical(
+                "VISA: SL MISSING for %s — attempting to re-place",
+                symbol,
+            )
+            # Find the position details and re-place
+            pos = next((p for p in positions if p.get("symbol") == symbol), None)
+            if pos:
+                amt = float(pos.get("positionAmt", 0.0))
+                entry = float(pos.get("entryPrice", 0.0))
+                if amt != 0 and entry > 0:
+                    direction = "LONG" if amt > 0 else "SHORT"
+                    try:
+                        feats = await asyncio.to_thread(
+                            self._market_data.compute_features, symbol
+                        )
+                        regime = self._regime_detector.detect(feats, feats)
+                        await self._visa_place_after_fill(
+                            symbol, direction, entry, abs(amt), feats, regime,
+                        )
+                    except Exception as exc:
+                        logger.critical(
+                            "VISA: FAILED to re-place SL for %s: %s",
+                            symbol, exc,
+                        )
+                        self._telegram.send_message(
+                            f"CRITICAL: Cannot re-place server-side SL for {symbol}.\n"
+                            f"Position is UNPROTECTED. Manual action required."
+                        )
+
+    async def _visa_sync_existing_positions(self, positions: list) -> None:
+        """
+        On startup, check existing positions and ensure they have server-side orders.
+
+        Called during initialize() to protect positions that may have lost
+        their server-side orders due to a bot restart.
+        """
+        if not self._visa:
+            return
+
+        for pos in positions:
+            symbol = pos.get("symbol", "")
+            amt = float(pos.get("positionAmt", 0.0))
+            entry = float(pos.get("entryPrice", 0.0))
+            if amt == 0.0 or entry <= 0:
+                continue
+
+            direction = "LONG" if amt > 0 else "SHORT"
+
+            # Check if server-side orders already exist for this symbol
+            try:
+                open_orders = await asyncio.to_thread(
+                    self._binance.get_open_orders, symbol
+                )
+                has_stop = any(
+                    o.get("type") in ("STOP_MARKET", "STOP")
+                    for o in open_orders
+                )
+                if has_stop:
+                    logger.info(
+                        "VISA startup: %s already has server-side SL, skipping",
+                        symbol,
+                    )
+                    continue
+            except Exception:
+                pass
+
+            # Place protective orders
+            logger.warning(
+                "VISA startup: %s has NO server-side SL — placing now",
+                symbol,
+            )
+            try:
+                feats = await asyncio.to_thread(
+                    self._market_data.compute_features, symbol
+                )
+                regime = self._regime_detector.detect(feats, feats)
+                await self._visa_place_after_fill(
+                    symbol, direction, entry, abs(amt), feats, regime,
+                )
+            except Exception as exc:
+                logger.critical(
+                    "VISA startup: FAILED to protect %s: %s — MANUAL ACTION REQUIRED",
+                    symbol, exc,
+                )
+                self._telegram.send_message(
+                    f"STARTUP WARNING: Cannot place server-side SL for {symbol}.\n"
+                    f"Position {direction} qty={abs(amt):.6f} entry={entry:.4f}\n"
+                    f"Error: {exc}"
+                )
+
     def get_diagnostics(self) -> Dict[str, Any]:
         """Return comprehensive diagnostics for all modules."""
-        return {
+        diag = {
             "time_sync": self._time_sync.get_diagnostics(),
             "health": self._health_monitor.get_diagnostics(),
             "execution": self._execution_engine.get_metrics(),
@@ -1107,3 +1433,6 @@ class DarwinV5Engine:
             "portfolio_weights": self._portfolio.get_weights(),
             "telemetry_events": self._telemetry.event_count,
         }
+        if self._visa:
+            diag["visa"] = self._visa.get_metrics()
+        return diag

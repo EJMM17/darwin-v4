@@ -36,6 +36,10 @@ class ExecutionConfig:
     min_notional_usdt: float = 5.0
     # Binance step sizes (common ones; fetched dynamically in production)
     default_step_size: float = 0.001
+    # Pre-trade liquidity check: reject if order > X% of top-5 book depth
+    max_book_impact_pct: float = 30.0   # order notional < 30% of visible book
+    # Emergency close retries (more aggressive than normal orders)
+    emergency_max_retries: int = 5
 
 
 @dataclass(slots=True)
@@ -155,6 +159,46 @@ class ExecutionEngine:
 
         return True, ""
 
+    def check_liquidity(self, symbol: str, side: str, notional_usdt: float) -> tuple[bool, str]:
+        """
+        Pre-trade liquidity check against order book depth.
+
+        Prevents sending a MARKET order that would eat through the book
+        and cause catastrophic slippage (e.g. a $500 order on a $200 book).
+
+        Returns (safe, reason).
+        """
+        cfg = self._config
+        try:
+            book = self._client.get_order_book_depth(symbol, limit=5)
+        except Exception:
+            # If we can't check the book, allow the trade (fail-open for availability)
+            return True, "book_check_failed"
+
+        levels = book.get("asks" if side == "BUY" else "bids", [])
+        if not levels:
+            return True, "empty_book"
+
+        # Sum available liquidity in the top 5 levels
+        total_liquidity = sum(
+            float(level[0]) * float(level[1])
+            for level in levels
+            if len(level) >= 2
+        )
+
+        if total_liquidity <= 0:
+            return True, "zero_liquidity"
+
+        impact_pct = (notional_usdt / total_liquidity) * 100.0
+        if impact_pct > cfg.max_book_impact_pct:
+            return False, (
+                f"book_impact_too_high: order ${notional_usdt:.2f} = "
+                f"{impact_pct:.1f}% of visible book ${total_liquidity:.2f} "
+                f"(max {cfg.max_book_impact_pct}%)"
+            )
+
+        return True, ""
+
     async def place_order(
         self, order: OrderRequest, dry_run: bool = False
     ) -> ExecutionResult:
@@ -195,6 +239,20 @@ class ExecutionEngine:
                 avg_price=order.price,
                 order_id="DRY_RUN",
             )
+
+        # Pre-trade liquidity check
+        if not order.reduce_only:
+            notional = order.quantity * order.price
+            liq_ok, liq_reason = self.check_liquidity(order.symbol, order.side, notional)
+            if not liq_ok:
+                self._total_rejects += 1
+                logger.warning("liquidity check failed for %s: %s", order.symbol, liq_reason)
+                return ExecutionResult(
+                    success=False,
+                    symbol=order.symbol,
+                    side=order.side,
+                    error=f"liquidity_check_failed: {liq_reason}",
+                )
 
         # Log pre-trade
         if self._telemetry:
@@ -275,7 +333,17 @@ class ExecutionEngine:
                     or "400 Client Error" in last_error   # generic Bad Request fallback
                     or "Bad Request" in last_error
                 )
-                if is_400:
+                # 502/503: Binance server-side issue — always retry with longer backoff
+                is_502_503 = any(
+                    code in last_error for code in ("502", "503", "binance_502", "binance_503")
+                )
+                if is_502_503:
+                    logger.warning("binance 502/503 on %s, retrying with extended backoff", order.symbol)
+                    # Extended backoff for server errors
+                    if attempt < cfg.max_retries:
+                        await asyncio.sleep(min(3.0 * (2 ** attempt), 30.0))
+                    continue
+                elif is_400:
                     if self._time_sync:
                         logger.warning("time sync triggered on 400 error, re-syncing clock")
                         self._time_sync.force_sync_on_error(400)
@@ -286,6 +354,9 @@ class ExecutionEngine:
                 elif "code=-2010" in last_error:
                     logger.error("insufficient balance (-2010), aborting retries")
                     break  # no point retrying, balance won't change
+                elif "code=-4131" in last_error or "PERCENT_PRICE" in last_error:
+                    logger.error("price filter violation (-4131) on %s, aborting", order.symbol)
+                    break  # price moved too far, retrying same price is futile
                 else:
                     # Any other Binance error — log it clearly and still retry
                     logger.warning("binance error: %s", last_error)
