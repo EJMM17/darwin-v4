@@ -89,12 +89,26 @@ class BinanceAdapter:
             try:
                 if method == "GET":
                     async with self._session.get(url, headers=headers) as resp:
+                        # Handle 5xx (502/503/504) explicitly — do NOT parse body as success
+                        if resp.status >= 500:
+                            raise RuntimeError(
+                                f"binance_server_error: HTTP {resp.status} on {path}"
+                            )
                         data = await resp.json()
                 else:
                     async with self._session.post(url, headers=headers) as resp:
+                        if resp.status >= 500:
+                            raise RuntimeError(
+                                f"binance_server_error: HTTP {resp.status} on {path}"
+                            )
                         data = await resp.json()
-                if "code" in data and data["code"] < 0:
-                    logger.warning("binance error: %s", data.get("msg"))
+                # Raise on Binance API errors instead of silently returning error dict.
+                # Callers that need the raw error (like place_order) catch RuntimeError.
+                if isinstance(data, dict) and "code" in data and data["code"] < 0:
+                    code = data["code"]
+                    msg = data.get("msg", "unknown")
+                    logger.warning("binance API error %d: %s (path=%s)", code, msg, path)
+                    raise RuntimeError(f"binance_api code={code} msg={msg}")
                 return data
             except Exception:
                 if attempt < 2:
@@ -180,7 +194,13 @@ class BinanceAdapter:
             params["timeInForce"] = "GTC"
         if request.reduce_only:
             params["reduceOnly"] = "true"
-        data = await self._signed("POST", "/fapi/v1/order", params)
+        try:
+            data = await self._signed("POST", "/fapi/v1/order", params)
+        except RuntimeError as exc:
+            return OrderResult(
+                success=False, error=str(exc),
+                exchange_id=ExchangeID.BINANCE,
+            )
         if "orderId" not in data:
             return OrderResult(
                 success=False, error=data.get("msg", "unknown"),
@@ -195,8 +215,25 @@ class BinanceAdapter:
         )
 
     async def close_position(self, symbol: str, side: OrderSide) -> OrderResult:
-        positions = await self.get_positions()
-        pos = next((p for p in positions if p.symbol == symbol and p.side == side), None)
+        # Retry get_positions up to 3 times — failing to get positions
+        # during a risk exit is catastrophic
+        pos = None
+        for _attempt in range(3):
+            try:
+                positions = await self.get_positions()
+                pos = next(
+                    (p for p in positions if p.symbol == symbol and p.side == side),
+                    None,
+                )
+                break
+            except Exception as exc:
+                logger.warning(
+                    "get_positions failed during close (attempt %d/3): %s",
+                    _attempt + 1, exc,
+                )
+                if _attempt < 2:
+                    await asyncio.sleep(1 * (_attempt + 1))
+
         if not pos:
             return OrderResult(
                 success=False, error="no_position",
@@ -208,7 +245,13 @@ class BinanceAdapter:
             "type": "MARKET", "quantity": str(pos.size),
             "reduceOnly": "true",
         }
-        data = await self._signed("POST", "/fapi/v1/order", params)
+        try:
+            data = await self._signed("POST", "/fapi/v1/order", params)
+        except RuntimeError as exc:
+            return OrderResult(
+                success=False, error=str(exc),
+                exchange_id=ExchangeID.BINANCE,
+            )
         if "orderId" not in data:
             return OrderResult(
                 success=False, error=data.get("msg", "unknown"),

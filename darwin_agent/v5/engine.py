@@ -423,6 +423,16 @@ class DarwinV5Engine:
             self._market_data.compute_features, "BTCUSDT"
         )
 
+        # 3a. Health gate: do NOT open new positions if exchange connectivity is degraded
+        if not self._health_monitor.is_healthy:
+            logger.warning(
+                "HEALTH GATE: exchange unhealthy (consecutive_failures=%d) — "
+                "skipping new entries, only managing open positions",
+                self._health_monitor.status.consecutive_failures,
+            )
+            # Still manage open positions (SL/TP) but don't open new ones
+            return
+
         # 3b. Kill switch: verificar límites de pérdida antes de abrir nuevas posiciones
         await self._check_kill_switches()
         if self._state.trading_halted:
@@ -646,10 +656,11 @@ class DarwinV5Engine:
         """
         Check all open positions for stop loss / take profit.
 
-        Three risk management layers:
+        Four risk management layers:
         1. Dynamic SL: max(fixed_sl_pct, atr_multiplier * ATR%) — adapts to volatility
         2. Trailing stop: once profit > activation threshold, trail at distance below peak
         3. Post-loss cooldown: after a SL, suppress new entries for N ticks
+        4. Emergency close with aggressive retry for SL orders (never give up on risk exits)
         """
         if not positions:
             return
@@ -686,10 +697,28 @@ class DarwinV5Engine:
                 else (entry_price - current_price) / entry_price
             )
 
+            # ── Layer 0: Liquidation proximity check ───────────────────────
+            # If unrealized loss is approaching maintenance margin, emergency flat
+            # regardless of SL settings. At 20x, maintenance margin ~ 4% of notional.
+            leverage = int(pos.get("leverage", cfg.leverage))
+            liq_threshold_pct = 0.80 / leverage  # 80% of max loss before liq
+            if pnl_pct <= -liq_threshold_pct:
+                close_reason = (
+                    f"LIQUIDATION_GUARD ({pnl_pct*100:.2f}% | "
+                    f"liq_threshold={liq_threshold_pct*100:.2f}% at {leverage}x)"
+                )
+                logger.critical(
+                    "LIQUIDATION PROXIMITY on %s: pnl=%.2f%% threshold=%.2f%% lev=%dx — EMERGENCY CLOSE",
+                    symbol, pnl_pct * 100, liq_threshold_pct * 100, leverage,
+                )
+                await self._emergency_close_position(
+                    symbol, is_long, abs(amt), entry_price, current_price,
+                    close_reason, tick, cfg,
+                )
+                continue
+
             # ── Layer 1: Dynamic SL/TP (ATR-based + regime-adaptive) ───────
-            # Fetch ATR for this symbol from cached features (non-blocking)
             atr_pct = 0.0
-            pos_regime = "trending"
             try:
                 feats = await asyncio.to_thread(
                     self._market_data.compute_features, symbol
@@ -702,111 +731,149 @@ class DarwinV5Engine:
                     symbol, exc,
                 )
 
-            # Detectar régimen de la posición para SL/TP adaptativos
-            # (usamos el régimen actual del engine)
             current_regime_val = self._state.current_regime
             is_ranging_pos = current_regime_val in ("range_bound", "low_vol")
 
             if is_ranging_pos:
-                # En lateral: SL/TP más ajustados para capturar moves pequeños
-                # Ratio 1.5:1 (vs 2:1 en tendencia) — adecuado para rango
                 sl_floor = cfg.sl_pct_ranging / 100.0
                 tp_pct   = cfg.tp_pct_ranging / 100.0
             else:
                 sl_floor = cfg.sl_pct_trending / 100.0
                 tp_pct   = cfg.tp_pct_trending / 100.0
 
-            # Effective SL = max(config floor por régimen, ATR multiple)
             sl_pct = max(sl_floor, cfg.atr_sl_multiplier * atr_pct)
 
             # ── Layer 2: Trailing stop ─────────────────────────────────────
             trail_sl = None
             if cfg.trailing_stop_enabled and pnl_pct > 0:
-                # Update peak profit seen for this position
                 peak_key = symbol
                 prev_peak = self._state.trailing_peaks.get(peak_key, 0.0)
                 new_peak = max(prev_peak, pnl_pct)
                 self._state.trailing_peaks[peak_key] = new_peak
 
-                # Once profit crosses activation threshold, set trailing SL
                 if new_peak >= cfg.trailing_activation_pct / 100.0:
                     trail_sl = new_peak - cfg.trailing_distance_pct / 100.0
-                    # Trailing SL is only triggered when PnL falls below it
-                    # (trail_sl could be negative if we gave back a lot)
 
             # ── Determine close reason ─────────────────────────────────────
             close_reason = ""
+            is_stop_loss = False
             if pnl_pct <= -sl_pct:
                 close_reason = f"STOP_LOSS ({pnl_pct*100:.2f}% | sl={sl_pct*100:.2f}% atr={atr_pct*100:.3f}%)"
+                is_stop_loss = True
             elif trail_sl is not None and pnl_pct <= trail_sl:
                 close_reason = f"TRAILING_STOP ({pnl_pct*100:.2f}% | trail={trail_sl*100:.2f}% peak={self._state.trailing_peaks.get(symbol, 0)*100:.2f}%)"
+                is_stop_loss = True  # trailing stop is also a risk exit
             elif pnl_pct >= tp_pct:
                 close_reason = f"TAKE_PROFIT ({pnl_pct*100:.2f}%)"
 
             if not close_reason:
                 continue
 
-            # Clean up trailing peak for this symbol
-            self._state.trailing_peaks.pop(symbol, None)
-
-            # Close position: opposite side, reduceOnly
-            close_side = "SELL" if is_long else "BUY"
-            close_qty = abs(amt)
-
-            logger.info(
-                "closing %s %s qty=%.6f reason=%s entry=%.2f current=%.2f",
-                close_side, symbol, close_qty, close_reason, entry_price, current_price,
+            await self._emergency_close_position(
+                symbol, is_long, abs(amt), entry_price, current_price,
+                close_reason, tick, cfg, is_stop_loss=is_stop_loss,
             )
 
-            close_order = V5OrderRequest(
-                symbol=symbol,
-                side=close_side,
-                quantity=close_qty,
-                price=current_price,
-                leverage=cfg.leverage,
-                reduce_only=True,
-            )
+    async def _emergency_close_position(
+        self,
+        symbol: str,
+        is_long: bool,
+        close_qty: float,
+        entry_price: float,
+        current_price: float,
+        close_reason: str,
+        tick: int,
+        cfg: "V5EngineConfig",
+        is_stop_loss: bool = True,
+    ) -> None:
+        """
+        Close a position using emergency retry for risk-critical exits.
 
+        SL and liquidation-avoidance orders use ExecutionEngine.emergency_close()
+        which retries 5 times with 0.5s base backoff and never aborts on rate limits.
+        TP orders use normal place_order.
+        """
+        # Clean up trailing peak for this symbol
+        self._state.trailing_peaks.pop(symbol, None)
+
+        close_side = "SELL" if is_long else "BUY"
+
+        logger.info(
+            "closing %s %s qty=%.6f reason=%s entry=%.2f current=%.2f emergency=%s",
+            close_side, symbol, close_qty, close_reason,
+            entry_price, current_price, is_stop_loss,
+        )
+
+        close_order = V5OrderRequest(
+            symbol=symbol,
+            side=close_side,
+            quantity=close_qty,
+            price=current_price,
+            leverage=cfg.leverage,
+            reduce_only=True,
+        )
+
+        # Use emergency_close for SL and liquidation exits, normal for TP
+        if is_stop_loss:
+            result = await self._execution_engine.emergency_close(close_order)
+        else:
             result = await self._execution_engine.place_order(
                 close_order, dry_run=cfg.dry_run
             )
 
-            if result.success:
-                # PnL = price_diff * qty. Leverage affects margin, not PnL.
-                # Position qty from exchange already reflects full notional.
-                pnl_usdt = pnl_pct * entry_price * close_qty
-                self._position_sizer.record_trade_pnl(pnl_usdt)
-                self._state.trade_pnls.append(pnl_usdt)
-                # Feed trade to institutional performance analytics
-                self._analytics.record_trade(pnl_usdt=pnl_usdt, is_win=(pnl_usdt > 0))
-                self._portfolio_risk.record_trade(pnl_pct=pnl_pct)
-                self._state.daily_pnl += pnl_usdt
+        pnl_pct = (
+            (current_price - entry_price) / entry_price
+            if is_long
+            else (entry_price - current_price) / entry_price
+        )
 
-                # ── Layer 3: Cooldown post-pérdida ────────────────────────
-                # If this was a stop loss (not TP or trailing), enforce cooldown
-                if "STOP_LOSS" in close_reason:
-                    cooldown_expiry = tick + cfg.post_loss_cooldown_ticks
-                    self._state.cooldown_until[symbol] = cooldown_expiry
-                    logger.info(
-                        "%s cooldown activo hasta tick %d (%d ticks)",
-                        symbol, cooldown_expiry, cfg.post_loss_cooldown_ticks,
-                    )
+        if result.success:
+            pnl_usdt = pnl_pct * entry_price * close_qty
+            self._position_sizer.record_trade_pnl(pnl_usdt)
+            self._state.trade_pnls.append(pnl_usdt)
+            self._analytics.record_trade(pnl_usdt=pnl_usdt, is_win=(pnl_usdt > 0))
+            self._portfolio_risk.record_trade(pnl_pct=pnl_pct)
+            self._state.daily_pnl += pnl_usdt
 
-                self._telegram.notify_position_closed(
-                    symbol=symbol,
-                    pnl=pnl_usdt,
-                    pnl_pct=pnl_pct * 100.0,
-                    reason=close_reason,
-                    equity=self._state.equity,
-                )
+            # ── Layer 3: Cooldown post-pérdida ────────────────────────
+            if "STOP_LOSS" in close_reason or "LIQUIDATION_GUARD" in close_reason:
+                cooldown_expiry = tick + cfg.post_loss_cooldown_ticks
+                self._state.cooldown_until[symbol] = cooldown_expiry
                 logger.info(
-                    "position closed: %s pnl=%.4f (%+.2f%%) reason=%s",
-                    symbol, pnl_usdt, pnl_pct * 100.0, close_reason,
+                    "%s cooldown activo hasta tick %d (%d ticks)",
+                    symbol, cooldown_expiry, cfg.post_loss_cooldown_ticks,
                 )
-            else:
-                logger.error(
-                    "FAILED to close position %s: %s", symbol, result.error
+
+            self._telegram.notify_position_closed(
+                symbol=symbol,
+                pnl=pnl_usdt,
+                pnl_pct=pnl_pct * 100.0,
+                reason=close_reason,
+                equity=self._state.equity,
+            )
+            logger.info(
+                "position closed: %s pnl=%.4f (%+.2f%%) reason=%s",
+                symbol, pnl_usdt, pnl_pct * 100.0, close_reason,
+            )
+        else:
+            # CRITICAL: If emergency close fails, notify immediately and halt
+            logger.critical(
+                "FAILED to close position %s: %s — MANUAL INTERVENTION REQUIRED",
+                symbol, result.error,
+            )
+            if is_stop_loss:
+                self._telegram.send_message(
+                    f"CRITICAL: Failed to close {symbol} ({close_reason})\n"
+                    f"Error: {result.error}\n"
+                    f"MANUAL INTERVENTION REQUIRED — position still open"
                 )
+                # Halt trading to prevent opening new positions while
+                # a risk-critical close has failed
+                self._state.trading_halted = True
+                self._state.halt_reason = (
+                    f"emergency_close_failed: {symbol} {result.error}"
+                )
+                self._state.halt_type = HaltReason.MAX_DRAWDOWN
 
     async def _process_symbol(self, symbol: str, btc_features: Any) -> None:
         """Process one symbol through the full pipeline."""

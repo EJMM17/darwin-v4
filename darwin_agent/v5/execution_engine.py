@@ -36,6 +36,14 @@ class ExecutionConfig:
     min_notional_usdt: float = 5.0
     # Binance step sizes (common ones; fetched dynamically in production)
     default_step_size: float = 0.001
+    # --- Risk hardening (HFT review) ---
+    # Pre-trade slippage guard: reject order if book mid deviates > N% from signal price
+    max_pretrade_deviation_pct: float = 0.3
+    # Emergency close: aggressive retry for risk-critical closes (SL, liquidation avoidance)
+    emergency_max_retries: int = 5
+    emergency_base_backoff_s: float = 0.5
+    # Abort slippage: cancel/reject fill if post-trade slippage exceeds this (hard reject)
+    abort_slippage_pct: float = 1.5
 
 
 @dataclass(slots=True)
@@ -226,12 +234,30 @@ class ExecutionEngine:
 
         return result
 
-    async def _execute_with_retry(self, order: OrderRequest) -> ExecutionResult:
-        """Execute order with exponential backoff retry."""
+    async def _execute_with_retry(
+        self, order: OrderRequest, *, is_emergency: bool = False,
+    ) -> ExecutionResult:
+        """
+        Execute order with exponential backoff retry.
+
+        Parameters
+        ----------
+        is_emergency : bool
+            If True, use aggressive retry settings (more retries, shorter
+            backoff). Used for SL closes and liquidation-avoidance orders
+            where failing to fill is catastrophic.
+        """
         cfg = self._config
         last_error = ""
 
-        for attempt in range(cfg.max_retries + 1):
+        if is_emergency:
+            max_retries = cfg.emergency_max_retries
+            base_backoff = cfg.emergency_base_backoff_s
+        else:
+            max_retries = cfg.max_retries
+            base_backoff = cfg.base_backoff_s
+
+        for attempt in range(max_retries + 1):
             t_start = time.time()
 
             try:
@@ -247,7 +273,37 @@ class ExecutionEngine:
                     slippage_pct = abs(result.avg_price - order.price) / order.price * 100.0
                     result.slippage_bps = slippage_pct * 100.0
 
-                    # Check slippage tolerance
+                    # HARD REJECT: if slippage exceeds abort threshold on entries
+                    # (never abort emergency closes — getting out is always priority)
+                    if (
+                        not is_emergency
+                        and not order.reduce_only
+                        and slippage_pct > cfg.abort_slippage_pct
+                    ):
+                        logger.error(
+                            "SLIPPAGE ABORT on %s: %.2f%% > abort_threshold %.2f%% — "
+                            "immediately closing entry to prevent holding a bad fill",
+                            order.symbol, slippage_pct, cfg.abort_slippage_pct,
+                        )
+                        # Immediately reverse the bad entry
+                        reverse_side = "SELL" if order.side == "BUY" else "BUY"
+                        reverse_order = OrderRequest(
+                            symbol=order.symbol,
+                            side=reverse_side,
+                            quantity=result.filled_qty,
+                            price=result.avg_price,
+                            leverage=order.leverage,
+                            reduce_only=True,
+                        )
+                        await self._execute_with_retry(reverse_order, is_emergency=True)
+                        result.success = False
+                        result.error = (
+                            f"slippage_abort: {slippage_pct:.2f}% > {cfg.abort_slippage_pct}% "
+                            f"(entry reversed)"
+                        )
+                        return result
+
+                    # Soft warning for slippage above tolerance but below abort
                     if slippage_pct > cfg.slippage_tolerance_pct:
                         logger.warning(
                             "high slippage on %s: %.2f%% (tolerance: %.2f%%)",
@@ -263,16 +319,10 @@ class ExecutionEngine:
                 latency_ms = (time.time() - t_start) * 1000.0
 
                 # Binance-specific error handling based on parsed code.
-                # NOTE: if response.json() fails (empty body), requests raises a plain
-                # "400 Client Error: Bad Request" without a Binance code.
-                # We treat any 400 as a potential timestamp issue and always re-sync.
-                # code=-1021: timestamp outside recvWindow → re-sync time
-                # code=-1003: rate limit hit → long backoff, don't hammer API
-                # code=-2010: insufficient balance → don't retry (won't fix itself)
                 is_400 = (
                     "code=-1021" in last_error
                     or "timestamp" in last_error.lower()
-                    or "400 Client Error" in last_error   # generic Bad Request fallback
+                    or "400 Client Error" in last_error
                     or "Bad Request" in last_error
                 )
                 if is_400:
@@ -280,25 +330,36 @@ class ExecutionEngine:
                         logger.warning("time sync triggered on 400 error, re-syncing clock")
                         self._time_sync.force_sync_on_error(400)
                 elif "code=-1003" in last_error:
-                    logger.warning("rate limit hit (-1003), backing off 30s")
-                    await asyncio.sleep(30.0)
-                    break  # don't retry further, let next tick handle it
+                    # Rate limit: for emergency closes, short backoff and KEEP RETRYING.
+                    # For normal orders, yield to next tick.
+                    if is_emergency:
+                        logger.warning(
+                            "rate limit hit (-1003) during EMERGENCY close, "
+                            "short backoff and retrying (attempt %d/%d)",
+                            attempt + 1, max_retries + 1,
+                        )
+                        await asyncio.sleep(2.0)
+                        # Do NOT break — keep retrying for emergency closes
+                    else:
+                        logger.warning("rate limit hit (-1003), backing off 30s")
+                        await asyncio.sleep(30.0)
+                        break
                 elif "code=-2010" in last_error:
                     logger.error("insufficient balance (-2010), aborting retries")
-                    break  # no point retrying, balance won't change
+                    break
                 else:
-                    # Any other Binance error — log it clearly and still retry
                     logger.warning("binance error: %s", last_error)
 
-                if attempt < cfg.max_retries:
+                if attempt < max_retries:
                     backoff = min(
-                        cfg.base_backoff_s * (2 ** attempt),
-                        cfg.max_backoff_s,
+                        base_backoff * (2 ** attempt),
+                        cfg.max_backoff_s if not is_emergency else 8.0,
                     )
                     logger.warning(
-                        "order failed (attempt %d/%d): %s, retrying in %.1fs",
+                        "%sorder failed (attempt %d/%d): %s, retrying in %.1fs",
+                        "EMERGENCY " if is_emergency else "",
                         attempt + 1,
-                        cfg.max_retries + 1,
+                        max_retries + 1,
                         last_error,
                         backoff,
                     )
@@ -309,8 +370,64 @@ class ExecutionEngine:
             symbol=order.symbol,
             side=order.side,
             error=f"max_retries_exceeded: {last_error}",
-            retries=cfg.max_retries,
+            retries=max_retries,
         )
+
+    async def emergency_close(self, order: OrderRequest) -> ExecutionResult:
+        """
+        Emergency close: aggressive retry for risk-critical orders.
+
+        Use this for stop-loss closes, liquidation avoidance, and any order
+        where failing to fill means the account is at risk.
+
+        Differences from normal place_order:
+          - 5 retries instead of 2
+          - 0.5s base backoff instead of 2s
+          - Rate limit hit does NOT abort (keeps retrying)
+          - Slippage is never a reason to abort (getting out is priority)
+        """
+        self._total_orders += 1
+
+        valid, reason = self.validate_order(order)
+        if not valid:
+            self._total_rejects += 1
+            return ExecutionResult(
+                success=False,
+                symbol=order.symbol,
+                side=order.side,
+                error=f"validation_failed: {reason}",
+            )
+
+        if self._telemetry:
+            self._telemetry.log_order_placed(
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.quantity,
+                price=order.price,
+                leverage=order.leverage,
+            )
+
+        result = await self._execute_with_retry(order, is_emergency=True)
+
+        if result.success and self._telemetry:
+            self._total_fills += 1
+            self._telemetry.log_order_filled(
+                symbol=result.symbol,
+                side=result.side,
+                filled_qty=result.filled_qty,
+                avg_price=result.avg_price,
+                fee=result.fee,
+                order_id=result.order_id,
+                slippage_bps=result.slippage_bps,
+            )
+        elif not result.success:
+            self._total_rejects += 1
+            logger.critical(
+                "EMERGENCY CLOSE FAILED for %s %s: %s — ACCOUNT AT RISK",
+                order.side, order.symbol, result.error,
+            )
+
+        return result
 
     def _place_on_exchange(self, order: OrderRequest) -> ExecutionResult:
         """Place the order on the exchange (blocking)."""

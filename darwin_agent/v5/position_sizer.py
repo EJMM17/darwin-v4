@@ -50,6 +50,10 @@ class SizerConfig:
     kelly_lookback: int = 30            # número de trades históricos para estimar Kelly
     kelly_min: float = 0.5             # escalar mínimo del Kelly (no bajar más del 50%)
     kelly_max: float = 1.5             # escalar máximo del Kelly (no subir más del 150%)
+    # --- Slippage buffer (HFT review) ---
+    # Expected slippage deducted from position size so the actual risk
+    # after fill matches the intended risk, not (intended + slippage).
+    expected_slippage_pct: float = 0.15  # 15 bps expected slippage on market orders
 
 
 @dataclass(slots=True)
@@ -246,6 +250,14 @@ class PositionSizer:
             * daily_loss_scale
             * confidence_scale
         )
+
+        # Slippage buffer: reduce position so that (size + expected_slippage)
+        # stays within the risk budget. Without this, the actual risk is
+        # intended_risk + slippage * leverage, which at 20x and 0.15% slippage
+        # means 3% extra loss on every entry.
+        slippage_haircut = 1.0 - (cfg.expected_slippage_pct / 100.0 * cfg.leverage)
+        slippage_haircut = max(0.5, slippage_haircut)  # floor at 50% to avoid degenerate sizing
+        position_size *= slippage_haircut
 
         # Per-symbol exposure cap
         max_symbol = equity * (cfg.max_symbol_exposure_pct / 100.0) * cfg.leverage
