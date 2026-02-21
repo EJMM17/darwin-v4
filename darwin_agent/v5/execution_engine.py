@@ -298,8 +298,31 @@ class ExecutionEngine:
         return result
 
     async def _execute_with_retry(self, order: OrderRequest) -> ExecutionResult:
-        """Execute order with exponential backoff retry."""
+        """Execute order with exponential backoff retry.
+
+        For new entries (not reduceOnly), uses LIMIT POST_ONLY when configured
+        to capture maker rebates. Falls back to MARKET if LIMIT doesn't fill
+        within limit_fill_timeout_s.
+
+        Fee savings at VIP0:
+            MARKET round-trip: 0.04% + 0.04% = 0.08% per trade
+            LIMIT entry + MARKET exit: -0.02% + 0.04% = 0.02% per trade
+            Net savings: 0.06% per trade = 0.6% per 10 trades
+            At 20 trades/day on $80 capital: ~$0.96/day recaptured
+        """
         cfg = self._config
+
+        # Attempt Post-Only LIMIT for entries (not reduceOnly, not exits)
+        if (
+            cfg.preferred_entry_type == "LIMIT_ENTRY"
+            and not order.reduce_only
+            and order.order_type == "MARKET"
+        ):
+            limit_result = await self._attempt_limit_entry(order)
+            if limit_result is not None:
+                return limit_result
+            # LIMIT didn't fill — fall through to MARKET
+
         last_error = ""
 
         for attempt in range(cfg.max_retries + 1):
@@ -500,6 +523,224 @@ class ExecutionEngine:
             error=error_msg,
         )
 
+    async def _attempt_limit_entry(self, order: OrderRequest) -> Optional[ExecutionResult]:
+        """
+        Attempt a LIMIT POST_ONLY entry to capture maker rebate.
+
+        Places a LIMIT order slightly inside the best bid/ask:
+        - BUY: price = best_bid + offset_bps (join the bid, slightly aggressive)
+        - SELL: price = best_ask - offset_bps (join the ask, slightly aggressive)
+
+        Post-Only (timeInForce=GTX on Binance) guarantees maker execution:
+        if the order would take liquidity, Binance rejects it instead of filling
+        as taker. This prevents accidental taker fees on a LIMIT order.
+
+        Returns ExecutionResult if filled, None if not filled (caller falls back to MARKET).
+        """
+        cfg = self._config
+        t_start = time.time()
+
+        try:
+            # Fetch best bid/ask for limit price computation
+            book = await asyncio.to_thread(
+                self._client.get_order_book_depth, order.symbol, 5
+            )
+
+            bids = book.get("bids", [])
+            asks = book.get("asks", [])
+            if not bids or not asks:
+                return None  # no book data, fall back to MARKET
+
+            best_bid = float(bids[0][0])
+            best_ask = float(asks[0][0])
+
+            if best_bid <= 0 or best_ask <= 0:
+                return None
+
+            # Compute limit price with offset
+            offset_mult = cfg.limit_offset_bps / 10000.0
+            if order.side == "BUY":
+                # Place slightly above best bid (more aggressive, higher fill chance)
+                limit_price = best_bid * (1.0 + offset_mult)
+                # But never above best ask (that would be a taker)
+                limit_price = min(limit_price, best_ask - 0.01)
+            else:
+                # Place slightly below best ask
+                limit_price = best_ask * (1.0 - offset_mult)
+                # But never below best bid
+                limit_price = max(limit_price, best_bid + 0.01)
+
+            if limit_price <= 0:
+                return None
+
+            # Place LIMIT POST_ONLY (GTX = Good Till Crossing)
+            result = await asyncio.to_thread(
+                self._place_limit_post_only, order, limit_price
+            )
+
+            if result is None:
+                return None
+
+            latency_ms = (time.time() - t_start) * 1000.0
+            result.latency_ms = latency_ms
+
+            if result.success:
+                # Compute slippage vs original signal price
+                if order.price > 0:
+                    slippage_pct = abs(result.avg_price - order.price) / order.price * 100.0
+                    result.slippage_bps = slippage_pct * 100.0
+
+                logger.info(
+                    "POST_ONLY LIMIT filled: %s %s qty=%.6f limit=%.4f avg=%.4f (saved taker fee)",
+                    order.side, order.symbol, result.filled_qty, limit_price, result.avg_price,
+                )
+                return result
+
+            # LIMIT was rejected or expired — check if it's still open
+            if result.order_id and result.error and "POST_ONLY_REJECT" not in result.error:
+                # Order exists but not filled yet — wait for fill
+                filled = await self._wait_for_limit_fill(order.symbol, result.order_id)
+                if filled and filled.success:
+                    filled.latency_ms = (time.time() - t_start) * 1000.0
+                    return filled
+                # Timed out — cancel and fall back to MARKET
+                await asyncio.to_thread(
+                    self._client.cancel_order, order.symbol, result.order_id
+                )
+
+            return None  # fall back to MARKET
+
+        except Exception as exc:
+            logger.debug(
+                "LIMIT entry attempt failed for %s, falling back to MARKET: %s",
+                order.symbol, exc,
+            )
+            return None
+
+    def _place_limit_post_only(
+        self, order: OrderRequest, limit_price: float
+    ) -> Optional[ExecutionResult]:
+        """Place a LIMIT POST_ONLY order on the exchange (blocking)."""
+        step = self._get_step_size(order.symbol)
+        precision = max(0, round(-math.log10(step))) if step > 0 else 3
+        quantity_str = f"{order.quantity:.{precision}f}"
+
+        # Format price to tick size precision
+        tick_size = self._symbol_info.get(order.symbol, {}).get("tick_size", 0.01)
+        if tick_size <= 0:
+            tick_size = 0.01
+        price_precision = max(0, round(-math.log10(tick_size)))
+        price_str = f"{limit_price:.{price_precision}f}"
+
+        params: Dict[str, Any] = {
+            "symbol": order.symbol,
+            "side": order.side,
+            "type": "LIMIT",
+            "quantity": quantity_str,
+            "price": price_str,
+            "timeInForce": "GTX",  # Post-Only: reject if would be taker
+        }
+
+        if self._time_sync:
+            params["timestamp"] = self._time_sync.synced_timestamp()
+        else:
+            params["timestamp"] = int(time.time() * 1000)
+
+        params["recvWindow"] = 10000
+
+        client = self._client
+        params["signature"] = client._sign(params)
+        url = f"{client._base_url}/fapi/v1/order"
+
+        try:
+            response = client._session.request(
+                "POST", url, params=params, timeout=client._timeout_s
+            )
+
+            if not response.ok:
+                try:
+                    err_body = response.json()
+                    binance_code = err_body.get("code", 0)
+                    binance_msg = err_body.get("msg", "unknown")
+                    # -5022 = "Order would immediately trigger" (GTX rejected)
+                    if binance_code == -5022 or "would immediately" in str(binance_msg).lower():
+                        return ExecutionResult(
+                            success=False,
+                            symbol=order.symbol,
+                            side=order.side,
+                            error="POST_ONLY_REJECT: would take liquidity",
+                        )
+                    return None  # other error, fall back to MARKET
+                except (ValueError, KeyError):
+                    return None
+
+            data = response.json()
+            filled_qty = float(data.get("executedQty", 0.0))
+            avg_price = float(data.get("avgPrice", 0.0))
+            order_id = str(data.get("orderId", ""))
+            status = data.get("status", "UNKNOWN")
+
+            if avg_price == 0 and filled_qty > 0:
+                avg_price = limit_price
+
+            return ExecutionResult(
+                success=filled_qty > 0 and status == "FILLED",
+                order_id=order_id,
+                symbol=order.symbol,
+                side=order.side,
+                filled_qty=filled_qty,
+                avg_price=avg_price,
+                error="" if filled_qty > 0 else f"limit_unfilled:{status}",
+            )
+        except Exception:
+            return None
+
+    async def _wait_for_limit_fill(
+        self, symbol: str, order_id: str
+    ) -> Optional[ExecutionResult]:
+        """Poll for LIMIT order fill within timeout."""
+        cfg = self._config
+        deadline = time.time() + cfg.limit_fill_timeout_s
+        client = self._client
+
+        while time.time() < deadline:
+            await asyncio.sleep(0.5)
+            try:
+                check_params: Dict[str, Any] = {
+                    "symbol": symbol,
+                    "orderId": order_id,
+                }
+                check_params["timestamp"] = (
+                    self._time_sync.synced_timestamp()
+                    if self._time_sync
+                    else int(time.time() * 1000)
+                )
+                check_params["recvWindow"] = 10000
+                check_params["signature"] = client._sign(check_params)
+                check_url = f"{client._base_url}/fapi/v1/order"
+                check_resp = client._session.get(
+                    check_url, params=check_params, timeout=client._timeout_s
+                )
+                check_resp.raise_for_status()
+                data = check_resp.json()
+
+                status = data.get("status", "UNKNOWN")
+                if status == "FILLED":
+                    return ExecutionResult(
+                        success=True,
+                        order_id=order_id,
+                        symbol=symbol,
+                        side=data.get("side", ""),
+                        filled_qty=float(data.get("executedQty", 0)),
+                        avg_price=float(data.get("avgPrice", 0)),
+                    )
+                if status in ("CANCELED", "EXPIRED", "REJECTED"):
+                    return None
+            except Exception:
+                break
+
+        return None
+
     def _get_step_size(self, symbol: str) -> float:
         """Get quantity step size for a symbol."""
         if symbol in self._symbol_info:
@@ -517,8 +758,18 @@ class ExecutionEngine:
     def load_symbol_info(self, step_sizes: Dict[str, float]) -> None:
         """Load symbol step sizes fetched from exchange info."""
         for symbol, step in step_sizes.items():
-            self._symbol_info[symbol] = {"step_size": step}
+            if symbol not in self._symbol_info:
+                self._symbol_info[symbol] = {}
+            self._symbol_info[symbol]["step_size"] = step
         logger.info("loaded step sizes for %d symbols", len(step_sizes))
+
+    def load_tick_sizes(self, tick_sizes: Dict[str, float]) -> None:
+        """Load price tick sizes for LIMIT order formatting."""
+        for symbol, tick in tick_sizes.items():
+            if symbol not in self._symbol_info:
+                self._symbol_info[symbol] = {}
+            self._symbol_info[symbol]["tick_size"] = tick
+        logger.info("loaded tick sizes for %d symbols", len(tick_sizes))
 
     def get_metrics(self) -> Dict[str, Any]:
         """Return execution metrics."""

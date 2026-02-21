@@ -26,7 +26,7 @@ logger = logging.getLogger("darwin.v5.position_sizer")
 class SizerConfig:
     """Configuration for dynamic position sizing."""
     base_risk_pct: float = 1.0          # base risk per trade (1% of equity)
-    leverage: int = 5                    # max leverage
+    leverage: int = 5                    # max leverage (may be overridden by dynamic leverage)
     # Volatility scaling
     target_vol: float = 0.02            # target annualized vol (2%)
     vol_scale_min: float = 0.5          # minimum vol scaling factor (floor para capital pequeño)
@@ -50,6 +50,14 @@ class SizerConfig:
     kelly_lookback: int = 30            # número de trades históricos para estimar Kelly
     kelly_min: float = 0.5             # escalar mínimo del Kelly (no bajar más del 50%)
     kelly_max: float = 1.5             # escalar máximo del Kelly (no subir más del 150%)
+    # ── Micro-capital compounding ──────────────────────────────────
+    # For accounts < $500, every cent matters. These settings ensure:
+    # 1. Profits are reinvested immediately via equity-based sizing
+    # 2. Position sizes are maximized within risk bounds
+    # 3. Geometric compounding is achieved by always using current equity
+    micro_capital_threshold: float = 500.0  # below this, use aggressive compounding
+    micro_min_position_pct: float = 8.0     # min position as % of equity (prevent dust)
+    micro_max_positions: int = 2            # max concurrent positions with small capital
 
 
 @dataclass(slots=True)
@@ -172,6 +180,7 @@ class PositionSizer:
         daily_pnl: float = 0.0,
         daily_start_equity: float = 0.0,
         sl_distance_pct: float = 0.0,
+        leverage_override: int = 0,
     ) -> SizeResult:
         """
         Compute position size for a new trade.
@@ -235,6 +244,9 @@ class PositionSizer:
         #   - If SL = 0.7% and risk = 2%, notional = equity * 2%/0.7% = 2.86x equity
         #   - The position automatically gets SMALLER when SL is wider (high vol)
         #     and LARGER when SL is tighter (low vol) — natural vol targeting.
+        # Use dynamic leverage if provided, otherwise fall back to config
+        leverage_for_sizing = leverage_override if leverage_override > 0 else cfg.leverage
+
         base_risk_pct = (risk_pct_override / 100.0) if risk_pct_override > 0 else (cfg.base_risk_pct / 100.0)
         risk_amount = equity * base_risk_pct
         # Use actual SL distance when provided, otherwise conservative fallback.
@@ -245,7 +257,7 @@ class PositionSizer:
         else:
             # Fallback: use 1.5% (trending default) as conservative estimate
             sl_for_sizing = 0.015
-        base_size = min(risk_amount / sl_for_sizing, equity * cfg.leverage)
+        base_size = min(risk_amount / sl_for_sizing, equity * leverage_for_sizing)
 
         # 2. Volatility scaling: inversely proportional to realized vol
         vol_scale = self._compute_vol_scale(realized_vol)
@@ -277,7 +289,7 @@ class PositionSizer:
         )
 
         # Per-symbol exposure cap
-        max_symbol = equity * (cfg.max_symbol_exposure_pct / 100.0) * cfg.leverage
+        max_symbol = equity * (cfg.max_symbol_exposure_pct / 100.0) * leverage_for_sizing
         position_size = min(position_size, max_symbol)
 
         # Total exposure cap
@@ -312,6 +324,23 @@ class PositionSizer:
             result.rejection_reason = f"drawdown {drawdown_pct:.1f}% >= halt threshold {cfg.dd_max_pct}%"
             return result
 
+        # ── Micro-capital compounding boost ────────────────────────────
+        # For accounts < $500, the standard sizing formula produces positions
+        # that barely exceed min notional ($5). This means:
+        #   - Most of the capital sits idle
+        #   - Compounding is negligible (can't compound dust)
+        #   - ROI growth is linear, not geometric
+        #
+        # Fix: ensure the position is at least micro_min_position_pct of equity.
+        # This trades a bit more aggressively but is necessary to achieve
+        # geometric growth on small accounts. The kill switch and SL still
+        # protect the downside.
+        if equity < cfg.micro_capital_threshold:
+            min_micro_notional = equity * (cfg.micro_min_position_pct / 100.0) * leverage_for_sizing
+            if position_size < min_micro_notional:
+                position_size = min_micro_notional
+                result.notes = f"micro_capital_boost: min_notional raised to ${min_micro_notional:.2f}"
+
         # Compute quantity
         quantity = position_size / price
 
@@ -327,12 +356,37 @@ class PositionSizer:
 
         # Min notional check (post-rounding)
         if notional < cfg.min_notional_usdt:
-            result.approved = False
-            result.rejection_reason = (
-                f"notional ${notional:.2f} < min ${cfg.min_notional_usdt}"
-                + (f" (rounds to 0 with step={step_size})" if step_size > 0 and quantity == 0 else "")
-            )
-            return result
+            # For micro-capital: try bumping quantity to exactly meet min notional
+            # instead of rejecting. With $80 equity, losing a trade to min-notional
+            # is worse than a slightly larger position.
+            if equity < cfg.micro_capital_threshold and price > 0:
+                min_qty = (cfg.min_notional_usdt * 1.05) / price  # +5% margin
+                if step_size > 0:
+                    min_qty = _math.ceil(min_qty / step_size) * step_size
+                min_notional_check = min_qty * price
+                # Only bump if we can afford it (within leverage limits)
+                max_affordable = equity * leverage_for_sizing
+                if min_notional_check <= max_affordable:
+                    quantity = min_qty
+                    notional = quantity * price
+                    result.notes = (
+                        f"micro_notional_bump: qty→{quantity:.8f} "
+                        f"notional→${notional:.2f} (was below min)"
+                    )
+                else:
+                    result.approved = False
+                    result.rejection_reason = (
+                        f"notional ${notional:.2f} < min ${cfg.min_notional_usdt} "
+                        f"(micro-cap cannot afford min position)"
+                    )
+                    return result
+            else:
+                result.approved = False
+                result.rejection_reason = (
+                    f"notional ${notional:.2f} < min ${cfg.min_notional_usdt}"
+                    + (f" (rounds to 0 with step={step_size})" if step_size > 0 and quantity == 0 else "")
+                )
+                return result
 
         result.position_size_usdt = position_size
         result.quantity = quantity

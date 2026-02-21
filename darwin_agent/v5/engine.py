@@ -42,6 +42,8 @@ from darwin_agent.v5.order_flow import OrderFlowIntelligence
 from darwin_agent.v5.performance_analytics import PerformanceAnalytics
 from darwin_agent.v5.portfolio_risk import PortfolioRiskManager, PortfolioRiskConfig
 from darwin_agent.v5.visa_order_manager import VISAOrderManager
+from darwin_agent.v5.dynamic_leverage import DynamicLeverageManager, DynamicLeverageConfig
+from darwin_agent.v5.kill_switch import EnhancedKillSwitch, KillSwitchConfig
 
 logger = logging.getLogger("darwin.v5.engine")
 
@@ -229,6 +231,16 @@ class DarwinV5Engine:
         self._portfolio = PortfolioConstructor(self._config.symbols)
         # VISA: server-side protective orders
         self._visa = VISAOrderManager(binance_client) if self._config.visa_enabled else None
+        # Dynamic leverage: adaptive per-trade leverage
+        self._dynamic_leverage = DynamicLeverageManager(DynamicLeverageConfig(
+            min_leverage=2,
+            max_leverage=self._config.leverage,
+            daily_loss_budget_pct=self._config.max_daily_loss_pct,
+        ))
+        # Enhanced kill switch: latency, flash crash, connectivity, margin
+        self._enhanced_kill_switch = EnhancedKillSwitch(
+            binance_client, telegram_notifier, KillSwitchConfig()
+        )
 
         # State
         self._state = V5EngineState()
@@ -459,8 +471,32 @@ class DarwinV5Engine:
             self._market_data.compute_features, "BTCUSDT"
         )
 
-        # 3b. Kill switch: verificar límites de pérdida antes de abrir nuevas posiciones
+        # 3b. Enhanced kill switch: check flash crash on all symbols via price changes
+        for pos in positions:
+            pos_symbol = pos.get("symbol", "")
+            pos_price = float(pos.get("markPrice", 0.0))
+            if pos_symbol and pos_price > 0:
+                self._enhanced_kill_switch.check_price_change(pos_symbol, pos_price)
+
+        # 3c. Kill switches: verificar límites de pérdida antes de abrir nuevas posiciones
         await self._check_kill_switches()
+
+        # Check enhanced kill switch (latency, flash crash, connectivity, margin)
+        if self._enhanced_kill_switch.should_halt and not self._state.trading_halted:
+            ks_state = self._enhanced_kill_switch.state
+            self._state.trading_halted = True
+            self._state.halt_reason = f"enhanced_kill_switch: {ks_state.halt_reason}"
+            self._state.halt_type = HaltReason.MAX_DRAWDOWN  # persistent halt
+            # Execute emergency shutdown
+            open_symbols = [s for s in self._config.symbols]
+            try:
+                await self._enhanced_kill_switch.emergency_shutdown(
+                    symbols=open_symbols,
+                    positions=self._state.open_positions,
+                )
+            except Exception as ks_exc:
+                logger.critical("enhanced kill switch emergency shutdown error: %s", ks_exc)
+
         if self._state.trading_halted:
             logger.warning(
                 "TRADING HALTED: %s | equity=$%.4f | daily_pnl=%.2f%%",
@@ -864,6 +900,7 @@ class DarwinV5Engine:
                 # Feed trade to institutional performance analytics
                 self._analytics.record_trade(pnl_usdt=pnl_usdt, is_win=(pnl_usdt > 0))
                 self._portfolio_risk.record_trade(pnl_pct=pnl_pct)
+                self._dynamic_leverage.record_trade_result(is_win=(pnl_usdt > 0))
                 self._state.daily_pnl += pnl_usdt
 
                 # ── Layer 3: Cooldown post-pérdida ────────────────────────
@@ -904,6 +941,7 @@ class DarwinV5Engine:
                         self._state.trade_pnls.append(pnl_usdt)
                         self._analytics.record_trade(pnl_usdt=pnl_usdt, is_win=(pnl_usdt > 0))
                         self._portfolio_risk.record_trade(pnl_pct=pnl_pct)
+                        self._dynamic_leverage.record_trade_result(is_win=(pnl_usdt > 0))
                         self._state.daily_pnl += pnl_usdt
                         logger.warning(
                             "EMERGENCY CLOSE succeeded for %s pnl=%.4f",
@@ -1167,6 +1205,22 @@ class DarwinV5Engine:
         atr_pct = features.atr_14 / features.close if features.close > 0 and features.atr_14 > 0 else 0.0
         sl_distance_for_sizing = max(sl_floor, cfg.atr_sl_multiplier * atr_pct)
 
+        # 7b. DYNAMIC LEVERAGE — compute per-trade leverage
+        # Adjusts leverage based on signal confidence, volatility, regime, and drawdown.
+        # Higher confidence + lower vol → more leverage (capitalize on edge)
+        # Lower confidence + higher vol → less leverage (survive toxic conditions)
+        dyn_lev_result = self._dynamic_leverage.compute(
+            signal_confidence=signal.confidence,
+            atr_pct=atr_pct,
+            regime=regime.regime.value,
+            drawdown_pct=self._state.drawdown_pct,
+        )
+        dynamic_lev = dyn_lev_result.leverage
+
+        logger.debug(
+            "%s dynamic_leverage: %s", symbol, dyn_lev_result.reason,
+        )
+
         size_result = self._position_sizer.compute(
             equity=self._state.equity,
             price=features.close,
@@ -1180,6 +1234,7 @@ class DarwinV5Engine:
             daily_pnl=effective_daily_pnl,
             daily_start_equity=self._state.daily_start_equity,
             sl_distance_pct=sl_distance_for_sizing,
+            leverage_override=dynamic_lev,
         )
 
         if not size_result.approved:
@@ -1199,17 +1254,33 @@ class DarwinV5Engine:
             risk_check.portfolio_heat_pct, risk_check.sizing_multiplier,
         )
 
-        # 8. Build order
+        # 8. Set dynamic leverage on exchange for this symbol
+        # Only set if different from what was configured at startup to avoid
+        # unnecessary API calls (Binance doesn't rate-limit leverage changes
+        # separately, but it's still one less RTT per trade).
+        if dynamic_lev != self._config.leverage:
+            try:
+                await asyncio.to_thread(
+                    self._binance.set_leverage, symbol, dynamic_lev
+                )
+            except Exception as lev_exc:
+                logger.warning(
+                    "%s failed to set dynamic leverage %dx: %s (using default %dx)",
+                    symbol, dynamic_lev, lev_exc, self._config.leverage,
+                )
+                dynamic_lev = self._config.leverage
+
+        # 9. Build order
         side = "BUY" if signal.direction == "LONG" else "SELL"
         order = V5OrderRequest(
             symbol=symbol,
             side=side,
             quantity=size_result.quantity,
             price=features.close,
-            leverage=self._config.leverage,
+            leverage=dynamic_lev,
         )
 
-        # 9. Execute
+        # 10. Execute
         result = await self._execution_engine.place_order(
             order, dry_run=self._config.dry_run
         )
@@ -1495,4 +1566,5 @@ class DarwinV5Engine:
         }
         if self._visa:
             diag["visa"] = self._visa.get_metrics()
+        diag["enhanced_kill_switch"] = self._enhanced_kill_switch.get_diagnostics()
         return diag
