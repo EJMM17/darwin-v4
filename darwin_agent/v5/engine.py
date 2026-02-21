@@ -21,6 +21,7 @@ import asyncio
 import datetime
 import logging
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Any, Dict, List
 
 from darwin_agent.v5.time_sync import TimeSyncManager
@@ -102,6 +103,27 @@ class V5EngineConfig:
     max_consecutive_errors: int = 10
 
 
+class HaltReason(Enum):
+    """Why trading was halted. Controls which halts reset daily vs persist."""
+    NONE = auto()
+    # Daily-scoped: auto-reset at UTC midnight
+    DAILY_LOSS_LIMIT = auto()
+    CIRCUIT_BREAKER_DAILY_LOSS = auto()
+    CIRCUIT_BREAKER_LOSS_STREAK = auto()
+    # Persistent: require manual restart
+    MAX_DRAWDOWN = auto()
+    CIRCUIT_BREAKER_MAX_DD = auto()
+
+    @property
+    def resets_daily(self) -> bool:
+        """True if this halt reason should auto-clear on new UTC day."""
+        return self in (
+            HaltReason.DAILY_LOSS_LIMIT,
+            HaltReason.CIRCUIT_BREAKER_DAILY_LOSS,
+            HaltReason.CIRCUIT_BREAKER_LOSS_STREAK,
+        )
+
+
 @dataclass(slots=True)
 class V5EngineState:
     """Runtime state of the v5 engine."""
@@ -128,6 +150,7 @@ class V5EngineState:
     # Kill switch state
     trading_halted: bool = False
     halt_reason: str = ""
+    halt_type: HaltReason = HaltReason.NONE
 
 
 class DarwinV5Engine:
@@ -265,9 +288,6 @@ class DarwinV5Engine:
         except Exception as exc:
             logger.warning("could not load symbol step sizes, using defaults: %s", exc)
 
-        # 6. Initialize position sizer daily tracking
-        self._position_sizer.reset_daily(self._state.equity)
-
         startup = {
             "wallet_balance": self._state.wallet_balance,
             "unrealized_pnl": self._state.unrealized_pnl,
@@ -385,15 +405,11 @@ class DarwinV5Engine:
             self._state.current_day = today
             self._state.daily_start_equity = self._state.equity
             self._state.daily_pnl = 0.0
-            self._position_sizer.reset_daily(self._state.equity)
             # Reset daily-scoped halts (max drawdown halt persists across days)
-            if self._state.trading_halted and (
-                "daily_loss_limit" in self._state.halt_reason
-                or "DAILY_LOSS_LIMIT" in self._state.halt_reason
-                or "LOSS_STREAK" in self._state.halt_reason
-            ):
+            if self._state.trading_halted and self._state.halt_type.resets_daily:
                 self._state.trading_halted = False
                 self._state.halt_reason = ""
+                self._state.halt_type = HaltReason.NONE
                 logger.info("KILL SWITCH reset: new trading day started")
             # Export equity curve CSV at day rollover (institutional audit trail)
             self._export_equity_csv()
@@ -450,6 +466,14 @@ class DarwinV5Engine:
                     if breached and not self._state.trading_halted:
                         self._state.trading_halted = True
                         self._state.halt_reason = f"circuit_breaker: {reason}"
+                        # Classify: loss streak and daily loss reset daily;
+                        # max drawdown persists.
+                        if "LOSS_STREAK" in reason:
+                            self._state.halt_type = HaltReason.CIRCUIT_BREAKER_LOSS_STREAK
+                        elif "DAILY_LOSS" in reason:
+                            self._state.halt_type = HaltReason.CIRCUIT_BREAKER_DAILY_LOSS
+                        else:
+                            self._state.halt_type = HaltReason.CIRCUIT_BREAKER_MAX_DD
                         logger.critical("CIRCUIT BREAKER HALT: %s", reason)
                         self._telegram.send_message(
                             f"CIRCUIT BREAKER ACTIVATED: {reason}\n"
@@ -575,6 +599,7 @@ class DarwinV5Engine:
             daily_loss_pct = (daily_start - equity) / daily_start * 100.0
             if daily_loss_pct >= cfg.max_daily_loss_pct:
                 self._state.trading_halted = True
+                self._state.halt_type = HaltReason.DAILY_LOSS_LIMIT
                 self._state.halt_reason = (
                     f"daily_loss_limit_breached: -{daily_loss_pct:.2f}% "
                     f"(limit={cfg.max_daily_loss_pct}%)"
@@ -599,6 +624,7 @@ class DarwinV5Engine:
             )
             if drawdown_pct >= cfg.max_drawdown_kill_pct:
                 self._state.trading_halted = True
+                self._state.halt_type = HaltReason.MAX_DRAWDOWN
                 self._state.halt_reason = (
                     f"max_drawdown_breached: -{drawdown_pct:.2f}% from peak "
                     f"(limit={cfg.max_drawdown_kill_pct}%)"
@@ -990,6 +1016,11 @@ class DarwinV5Engine:
             for p in self._state.open_positions
         )
 
+        # Use equity-based daily PnL (includes unrealized) — same metric as
+        # the kill switch, so position sizer throttles BEFORE the kill switch
+        # halts us with max exposure still open.
+        effective_daily_pnl = self._state.equity - self._state.daily_start_equity
+
         size_result = self._position_sizer.compute(
             equity=self._state.equity,
             price=features.close,
@@ -1000,7 +1031,7 @@ class DarwinV5Engine:
             current_exposure=current_exposure,
             step_size=self._symbol_step_sizes.get(symbol, 0.0),
             risk_pct_override=effective_risk_pct,
-            daily_pnl=self._state.daily_pnl,
+            daily_pnl=effective_daily_pnl,
             daily_start_equity=self._state.daily_start_equity,
         )
 
@@ -1036,16 +1067,25 @@ class DarwinV5Engine:
             order, dry_run=self._config.dry_run
         )
 
-        # Always record trade tick for throttle — prevents spam on repeated failures
-        self._state.last_trade_tick[symbol] = self._state.tick_count
-
         if result.success:
+            # Record trade tick for ranging throttle on success
+            self._state.last_trade_tick[symbol] = self._state.tick_count
             logger.info(
                 "order filled: %s %s qty=%.6f price=%.2f slippage=%.1fbps",
                 side, symbol, result.filled_qty, result.avg_price, result.slippage_bps,
             )
         else:
-            logger.warning("order failed: %s %s error=%s", side, symbol, result.error)
+            # Throttle on permanent rejections (insufficient margin, validation)
+            # but NOT on transient network errors — those shouldn't block the
+            # next valid signal for 10+ minutes.
+            err_lower = (result.error or "").lower()
+            is_transient = any(kw in err_lower for kw in (
+                "timeout", "connection", "503", "502", "429", "recvwindow",
+                "network", "reset by peer",
+            ))
+            if not is_transient:
+                self._state.last_trade_tick[symbol] = self._state.tick_count
+            logger.warning("order failed: %s %s error=%s transient=%s", side, symbol, result.error, is_transient)
 
     def get_diagnostics(self) -> Dict[str, Any]:
         """Return comprehensive diagnostics for all modules."""
