@@ -787,7 +787,7 @@ class SimulatedAgent:
         "_closed_trades", "_pnl_series", "_trend_series", "_exposure",
         "_position", "_rng", "_sharpe_returns",
         "_cooldown_until", "_exposure_mult", "_fee_rate", "_n_bars",
-        "_bars_gated",
+        "_bars_gated", "_liquidations", "_funding_paid",
     )
 
     def __init__(
@@ -816,6 +816,8 @@ class SimulatedAgent:
         self._fee_rate = fee_rate
         self._n_bars = 0
         self._bars_gated = 0
+        self._liquidations = 0
+        self._funding_paid = 0.0
 
     def step(self, ticks: Dict[str, Tick], step: int) -> None:
         """Process one time step across all symbols."""
@@ -824,11 +826,118 @@ class SimulatedAgent:
 
         # Check existing position
         if self._position:
+            # Simulate funding rate every 480 steps (~8h at 1min bars)
+            # Binance charges funding every 8 hours. Typical funding rate
+            # ranges from -0.1% to +0.1%. We simulate with a random rate
+            # biased slightly negative (longs pay shorts in trending markets).
+            if step % 480 == 0 and step > 0:
+                self._apply_funding_rate(ticks, step)
+
+            # Check for liquidation BEFORE exit logic
+            if self._check_liquidation(ticks, step):
+                return  # position was liquidated
+
             self._check_exit(ticks, step, genes)
 
         # Try new entry if no position and not on cooldown
         if not self._position and step >= self._cooldown_until:
             self._check_entry(ticks, step, genes)
+
+    def _apply_funding_rate(
+        self, ticks: Dict[str, Tick], step: int,
+    ) -> None:
+        """Simulate Binance 8h funding rate payment.
+
+        In production, funding = position_notional * funding_rate.
+        Longs pay when rate > 0, shorts pay when rate < 0.
+        Typical crypto funding: -0.01% to +0.03% per 8h.
+        """
+        pos = self._position
+        if not pos:
+            return
+        sym = pos["symbol"]
+        if sym not in ticks:
+            return
+
+        # Simulate funding rate: slight positive bias (longs pay)
+        funding_rate = self._rng.gauss(0.0001, 0.0003)  # mean=0.01%, std=0.03%
+        notional = pos["size"] * ticks[sym].price
+
+        if pos["side"] == "long":
+            funding_cost = notional * funding_rate
+        else:
+            funding_cost = -notional * funding_rate
+
+        self._capital -= funding_cost
+        self._funding_paid += abs(funding_cost)
+
+    def _check_liquidation(
+        self, ticks: Dict[str, Tick], step: int,
+    ) -> bool:
+        """Check if position would be liquidated by mark price.
+
+        Binance liquidation: when unrealized loss exceeds maintenance margin.
+        Maintenance margin = notional * maintenance_rate (typically 0.4-2%).
+        We use 4% maintenance margin (conservative for high leverage).
+
+        Returns True if liquidated.
+        """
+        pos = self._position
+        if not pos:
+            return False
+
+        sym = pos["symbol"]
+        if sym not in ticks:
+            return False
+
+        price = ticks[sym].price
+        entry = pos["entry_price"]
+        side = pos["side"]
+
+        if side == "long":
+            pnl_pct = (price - entry) / entry
+        else:
+            pnl_pct = (entry - price) / entry
+
+        # Effective leverage from position size
+        notional = pos["size"] * entry
+        effective_leverage = notional / max(self._capital, 0.01)
+
+        # Liquidation threshold: when loss exceeds (1/leverage - maintenance_rate)
+        # For 10x leverage: liquidation at ~6% adverse move (1/10 - 0.04 = 0.06)
+        maintenance_rate = 0.04
+        liq_threshold = -(1.0 / max(effective_leverage, 1.0) - maintenance_rate)
+
+        if pnl_pct <= liq_threshold:
+            # LIQUIDATED — lose entire position margin + penalty
+            margin = notional / max(effective_leverage, 1.0)
+            liq_penalty = margin * 0.5  # Binance insurance fund deduction
+            total_loss = margin + liq_penalty
+            self._capital -= total_loss
+            self._pnl_series.append(-total_loss)
+            self._trend_series.append(ticks[sym].trend_strength)
+            self._sharpe_returns.append(-1.0)  # catastrophic
+            self._losses += 1
+            self._liquidations += 1
+
+            if self._capital > self._peak:
+                self._peak = self._capital
+            dd = (self._peak - self._capital) / max(self._peak, 0.01) * 100
+            if dd > self._max_dd:
+                self._max_dd = dd
+
+            self._closed_trades.append(SimTrade(
+                symbol=sym, entry_price=entry, exit_price=price,
+                entry_step=pos["entry_step"], exit_step=step,
+                size=pos["size"], pnl=round(-total_loss, 4),
+                pnl_pct=round(pnl_pct * 100, 2), side=side,
+            ))
+            self._position = None
+            self._exposure = {}
+            self._cooldown_until = step + 50  # long cooldown after liquidation
+            return True
+
+        return False
 
     def _check_entry(
         self, ticks: Dict[str, Tick], step: int, genes: Dict[str, float],
@@ -1590,3 +1699,108 @@ class SimulationHarness:
                 "max": round(max(values), 4),
             }
         return stats
+
+    # ═════════════════════════════════════════════════════════════
+    # Walk-Forward Out-of-Sample Validation (Anti-Overfitting)
+    # ═════════════════════════════════════════════════════════════
+
+    async def validate_out_of_sample(
+        self,
+        dna_pool: List[DNAData],
+        oos_steps: int = 500,
+        n_oos_runs: int = 3,
+    ) -> Dict[str, Any]:
+        """
+        Run the best genomes from evolution through UNSEEN price data
+        to detect overfitting.
+
+        Walk-forward protocol:
+          1. Take the evolved DNA pool (trained in-sample)
+          2. Generate N independent OOS price paths (different RNG seeds)
+          3. Run each genome against OOS data WITHOUT mutation or evolution
+          4. Compare in-sample fitness vs OOS fitness
+          5. Flag genomes with >40% fitness degradation as overfit
+
+        Returns dict with:
+          - oos_mean_fitness: average fitness across OOS runs
+          - degradation_pct: (in_sample - oos) / in_sample * 100
+          - overfit_flag: True if degradation > 40%
+          - per_genome: list of per-genome OOS results
+
+        This is the CRITICAL missing piece: without OOS validation,
+        the GA simply memorizes the Monte Carlo paths it trained on.
+        """
+        if not dna_pool:
+            return {"oos_mean_fitness": 0.0, "degradation_pct": 0.0,
+                    "overfit_flag": False, "per_genome": []}
+
+        cfg = self._cfg
+        oos_results: List[Dict[str, Any]] = []
+
+        for run_idx in range(n_oos_runs):
+            # Generate UNSEEN price data with a completely different seed
+            oos_seed = cfg.seed * 1000 + run_idx + 7919  # prime offset
+            oos_rng = random.Random(oos_seed)
+            oos_prices = cfg.scenario.generate(oos_steps, oos_rng)
+
+            # Run each genome through OOS data (no evolution, no mutation)
+            fee_rate = cfg.taker_fee + cfg.slippage
+            per_agent_cap = cfg.starting_capital / max(len(dna_pool), 1)
+
+            for gi, dna in enumerate(dna_pool):
+                agent = SimulatedAgent(
+                    agent_id=f"oos-r{run_idx}-g{gi}",
+                    dna=DNAData(genes=dict(dna.genes), generation=0,
+                                dna_id=f"oos-{gi}"),
+                    capital=per_agent_cap,
+                    rng=random.Random(oos_rng.randint(0, 2**32)),
+                    fee_rate=fee_rate,
+                )
+
+                for step in range(oos_steps):
+                    step_ticks = {
+                        sym: ticks[step] for sym, ticks in oos_prices.items()
+                    }
+                    agent.step(step_ticks, step)
+
+                ed = agent.get_eval_data()
+                oos_results.append({
+                    "genome_idx": gi,
+                    "run": run_idx,
+                    "is_fitness": dna.fitness,
+                    "oos_pnl": ed.metrics.realized_pnl,
+                    "oos_trades": ed.metrics.total_trades,
+                    "oos_win_rate": ed.metrics.win_rate,
+                    "oos_capital": ed.metrics.capital,
+                })
+
+        # Aggregate
+        if not oos_results:
+            return {"oos_mean_fitness": 0.0, "degradation_pct": 0.0,
+                    "overfit_flag": False, "per_genome": []}
+
+        oos_returns = [
+            (r["oos_capital"] - per_agent_cap) / per_agent_cap
+            for r in oos_results
+        ]
+        is_fitnesses = [r["is_fitness"] for r in oos_results if r["is_fitness"] > 0]
+        oos_mean_return = statistics.mean(oos_returns) if oos_returns else 0.0
+
+        # Use return as proxy for OOS fitness
+        is_mean = statistics.mean(is_fitnesses) if is_fitnesses else 0.0
+        # Degradation: how much worse is OOS vs IS
+        degradation = 0.0
+        if is_mean > 0:
+            # Compare normalized: positive return in OOS vs IS fitness
+            oos_proxy = max(0.0, 0.5 + oos_mean_return)  # map to [0,1]ish
+            degradation = max(0.0, (is_mean - oos_proxy) / is_mean * 100)
+
+        return {
+            "oos_mean_return": round(oos_mean_return * 100, 2),
+            "oos_runs": n_oos_runs,
+            "oos_total_tests": len(oos_results),
+            "is_mean_fitness": round(is_mean, 4),
+            "degradation_pct": round(degradation, 1),
+            "overfit_flag": degradation > 40.0,
+            "per_genome": oos_results,
+        }

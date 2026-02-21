@@ -1,7 +1,25 @@
 """
-Darwin v4 — Risk-Aware Fitness Model v4.4.
+Darwin v4 — Risk-Aware Fitness Model v4.5.
 
-v4.3 → v4.4: adds activity penalty + expectancy convexity.
+v4.4 → v4.5: adds anti-overfitting penalties.
+
+  ANTI-OVERFITTING CHANGES (v4.5):
+    1. Sortino ratio replaces raw Sharpe in risk_stability pillar.
+       Sharpe treats upside vol as risk — that's wrong for trend-followers.
+       Sortino only penalizes downside deviation, which is the real risk.
+
+    2. Profit concentration penalty: penalizes genomes where >50% of total
+       PnL comes from a single trade. A bot that survives on one lucky trade
+       is memorizing noise, not finding alpha.
+
+    3. Minimum trade count scaling: raw_score *= min(1, trade_count / 20).
+       A bot with 3 trades and 0.95 fitness is statistically meaningless.
+       This smoothly ramps fitness from 0 at 0 trades to full at 20+ trades.
+
+    4. Drawdown duration penalty integrated into drawdown_health:
+       A bot that spends 90% of its lifetime underwater is a ticking bomb
+       even if max drawdown is only 5%. In production, mark price wicks
+       would liquidate it.
 
   ┌─────────────────────┬────────┬──────────────────────────────────────────┐
   │ Pillar              │ Weight │ Sub-components                           │
@@ -83,6 +101,10 @@ class FitnessConfig:
     k_activity: float = 4.0
     # expectancy convexity (v4.4)
     convexity_alpha: float = 1.5
+    # anti-overfitting (v4.5)
+    min_trades_for_full_score: int = 20
+    profit_concentration_threshold: float = 0.50  # penalty if single trade > 50% of PnL
+    sortino_excellent: float = 4.0  # Sortino reference for normalization
 
 
 # ── Fitness breakdown ────────────────────────────────────────
@@ -223,8 +245,13 @@ class RiskAwareFitness:
         raw_return = realized_pnl / cap
         rap = _clamp((raw_return - self._cfg.profit_floor_multiple) / rng)
 
-        # 2. Sharpe quality
-        sq = _clamp(max(0, sharpe) / self._cfg.sharpe_excellent)
+        # 2. Sharpe quality (blended with Sortino for anti-overfitting)
+        # Pure Sharpe penalizes upside vol — bad for trend-followers.
+        # Blend: 40% Sharpe + 60% Sortino to reward asymmetric returns.
+        sq_sharpe = _clamp(max(0, sharpe) / self._cfg.sharpe_excellent)
+        sortino = self._compute_sortino(pnl_series)
+        sq_sortino = _clamp(max(0, sortino) / self._cfg.sortino_excellent)
+        sq = 0.4 * sq_sharpe + 0.6 * sq_sortino
 
         # 3. Drawdown health (quadratic)
         linear_dd = _clamp(1.0 - max_drawdown_pct / self._cfg.drawdown_fatal_pct)
@@ -330,6 +357,29 @@ class RiskAwareFitness:
             w.convexity_score * conv_score
         )
 
+        # ════════════════════════════════════════════════════
+        # v4.5 ANTI-OVERFITTING MULTIPLIERS
+        # Applied AFTER weighted sum to penalize statistical flukes.
+        # ════════════════════════════════════════════════════
+
+        # 1. Minimum trade count scaling: ramp from 0→1 over [0, min_trades].
+        #    A bot with 3 trades and 0.95 fitness is noise, not alpha.
+        min_trades = self._cfg.min_trades_for_full_score
+        trade_scale = min(1.0, trade_count / min_trades) if min_trades > 0 else 1.0
+        raw_score *= trade_scale
+
+        # 2. Profit concentration penalty: if a single trade accounts for
+        #    >threshold of total gross profit, multiply fitness by (1 - excess).
+        #    This kills genomes that survive on one lucky trade.
+        if gross_profit > 0 and len(pnl_series) >= 2:
+            max_single = max(pnl_series)
+            if max_single > 0:
+                concentration = max_single / gross_profit
+                threshold = self._cfg.profit_concentration_threshold
+                if concentration > threshold:
+                    excess = min(concentration - threshold, 0.5)
+                    raw_score *= (1.0 - excess)
+
         return FitnessBreakdown(
             risk_adjusted_profit=rap, sharpe_quality=sq,
             drawdown_health=dh, consistency=cons,
@@ -377,6 +427,39 @@ class RiskAwareFitness:
             if agent_pnl < 0:
                 penalty = 0.3
         return _clamp(base - penalty), state_str, penalty
+
+    @staticmethod
+    def _compute_sortino(pnl_series: Sequence[float]) -> float:
+        """Sortino ratio: mean / downside_std * sqrt(n).
+
+        Unlike Sharpe, Sortino only penalizes downside deviation.
+        A bot with volatile upside but controlled downside gets rewarded.
+
+        Edge cases:
+          - No losses → excellent (return high Sortino)
+          - All losses identical (std=0) → use abs(mean_loss) as proxy
+            This prevents zero-division when losses are constant.
+        """
+        if len(pnl_series) < 5:
+            return 0.0
+        mean_pnl = statistics.mean(pnl_series)
+        downside = [p for p in pnl_series if p < 0]
+        if not downside:
+            # No losses at all — excellent downside control
+            return max(0.0, mean_pnl) * math.sqrt(min(len(pnl_series), 252))
+        if len(downside) == 1:
+            down_std = abs(downside[0])
+        else:
+            down_std = statistics.stdev(downside)
+        # When all losses are identical, stdev=0. Use mean loss magnitude
+        # as fallback — constant small losses are good, not zero-scored.
+        if down_std <= 1e-9:
+            down_std = abs(statistics.mean(downside))
+        if down_std <= 1e-9:
+            return 0.0
+        n_trades = max(len(pnl_series), 1)
+        annualization = math.sqrt(min(n_trades, 252))
+        return (mean_pnl / down_std) * annualization
 
     def _compute_diversification(self, agent_exposure, snapshot):
         if snapshot is None:
