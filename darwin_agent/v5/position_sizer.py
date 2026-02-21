@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict
 
@@ -101,11 +102,7 @@ class PositionSizer:
 
     def __init__(self, config: SizerConfig | None = None) -> None:
         self._config = config or SizerConfig()
-        self._trade_pnls: list = []      # historial completo de PnL para Kelly Criterion
-
-    def reset_daily(self, equity: float) -> None:
-        """Reset daily tracking (call at start of each day). Kept for Kelly context."""
-        pass
+        self._trade_pnls: deque = deque(maxlen=200)
 
 
     def _compute_kelly_scale(self, cfg: SizerConfig) -> float:
@@ -126,7 +123,7 @@ class PositionSizer:
         Returns a scaling factor clamped to [kelly_min, kelly_max].
         Returns 1.0 (no adjustment) if insufficient data or poor statistics.
         """
-        recent = self._trade_pnls[-cfg.kelly_lookback:]
+        recent = list(self._trade_pnls)[-cfg.kelly_lookback:]
         wins = [p for p in recent if p > 0]
         losses = [p for p in recent if p < 0]
 
@@ -160,9 +157,6 @@ class PositionSizer:
     def record_trade_pnl(self, pnl: float) -> None:
         """Record a closed trade's P&L for Kelly criterion tracking."""
         self._trade_pnls.append(pnl)
-        # Cap history to 200 trades (memory efficiency)
-        if len(self._trade_pnls) > 200:
-            self._trade_pnls = self._trade_pnls[-200:]
 
     def compute(
         self,
