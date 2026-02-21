@@ -171,6 +171,7 @@ class PositionSizer:
         risk_pct_override: float = 0.0,
         daily_pnl: float = 0.0,
         daily_start_equity: float = 0.0,
+        sl_distance_pct: float = 0.0,
     ) -> SizeResult:
         """
         Compute position size for a new trade.
@@ -195,6 +196,10 @@ class PositionSizer:
             Minimum quantity increment for this symbol (e.g. 0.001 for BTC).
             If provided, quantity is rounded to this step and notional is
             re-checked AFTER rounding to avoid validation_failed: rounds to 0.
+        sl_distance_pct : float
+            Actual stop-loss distance as a fraction (e.g., 0.015 for 1.5%).
+            When provided, position is sized so that SL hit = exactly
+            risk_fraction of equity lost. When 0, falls back to config default.
 
         Returns
         -------
@@ -232,10 +237,15 @@ class PositionSizer:
         #     and LARGER when SL is tighter (low vol) — natural vol targeting.
         base_risk_pct = (risk_pct_override / 100.0) if risk_pct_override > 0 else (cfg.base_risk_pct / 100.0)
         risk_amount = equity * base_risk_pct
-        # Use a conservative SL estimate for sizing (actual SL is ATR-dynamic)
-        # Default SL floor from config: 1.5% trending, 0.7% ranging
-        sl_estimate = max(0.005, cfg.base_risk_pct / 100.0)  # at minimum 0.5% SL
-        base_size = min(risk_amount / sl_estimate, equity * cfg.leverage)
+        # Use actual SL distance when provided, otherwise conservative fallback.
+        # The SL distance comes from the engine (ATR-dynamic per regime).
+        # Floor at 0.5% to prevent extreme sizing on very tight SLs.
+        if sl_distance_pct > 0:
+            sl_for_sizing = max(0.005, sl_distance_pct)
+        else:
+            # Fallback: use 1.5% (trending default) as conservative estimate
+            sl_for_sizing = 0.015
+        base_size = min(risk_amount / sl_for_sizing, equity * cfg.leverage)
 
         # 2. Volatility scaling: inversely proportional to realized vol
         vol_scale = self._compute_vol_scale(realized_vol)

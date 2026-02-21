@@ -94,7 +94,8 @@ class V5EngineConfig:
     # En RANGE_BOUND / LOW_VOL: más exigente, SL/TP ajustados, throttle de freq.
 
     # Confianza mínima por régimen
-    confidence_threshold_trending: float = 0.60   # umbral en tendencia
+    # Old: 0.60 trending → z=0.41 (noise). New: 0.72 → z=0.60 (meaningful)
+    confidence_threshold_trending: float = 0.72   # umbral en tendencia
     confidence_threshold_ranging:  float = 0.78   # más exigente en lateral
 
     # SL/TP por régimen
@@ -1159,6 +1160,13 @@ class DarwinV5Engine:
         # halts us with max exposure still open.
         effective_daily_pnl = self._state.equity - self._state.daily_start_equity
 
+        # Compute the actual SL distance that will be used for this trade.
+        # This lets the position sizer calculate notional so SL hit = exactly risk% lost.
+        is_ranging = self._state.current_regime in ("range_bound", "low_vol")
+        sl_floor = cfg.sl_pct_ranging / 100.0 if is_ranging else cfg.sl_pct_trending / 100.0
+        atr_pct = features.atr_14 / features.close if features.close > 0 and features.atr_14 > 0 else 0.0
+        sl_distance_for_sizing = max(sl_floor, cfg.atr_sl_multiplier * atr_pct)
+
         size_result = self._position_sizer.compute(
             equity=self._state.equity,
             price=features.close,
@@ -1171,6 +1179,7 @@ class DarwinV5Engine:
             risk_pct_override=effective_risk_pct,
             daily_pnl=effective_daily_pnl,
             daily_start_equity=self._state.daily_start_equity,
+            sl_distance_pct=sl_distance_for_sizing,
         )
 
         if not size_result.approved:

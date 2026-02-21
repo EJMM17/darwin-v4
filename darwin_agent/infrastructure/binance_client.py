@@ -219,8 +219,9 @@ class BinanceFuturesClient:
             mark_price = float(data.get("markPrice", 0.0))
             if mark_price > 0:
                 return mark_price
-            # Fallback to last price if mark price is missing
-            return float(data.get("lastFundingRate", 0.0))
+            # Fallback to index price (composite of major exchanges)
+            # NOT lastFundingRate — that's a rate (e.g. 0.0001), not a price
+            return float(data.get("indexPrice", 0.0))
         except Exception:
             return 0.0
 

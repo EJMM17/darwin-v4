@@ -93,8 +93,29 @@ class MarketDataLayer:
         # Cache: (symbol, interval) -> (timestamp, candles)
         self._cache: Dict[Tuple[str, str], Tuple[float, List[OHLCV]]] = {}
         # Thread safety: compute_features is called via asyncio.to_thread
-        # from multiple coroutines. requests.Session and cache dict need protection.
+        # from multiple coroutines.
         self._lock = threading.Lock()
+        # Per-thread HTTP sessions to avoid requests.Session thread-safety issues.
+        # requests.Session is NOT thread-safe: concurrent requests corrupt the
+        # internal connection pool (urllib3 PoolManager). The old code grabbed
+        # a reference to self._client._session under lock but then used it
+        # OUTSIDE the lock, creating a race condition.
+        # Fix: each thread gets its own session via threading.local().
+        self._thread_local = threading.local()
+        # Store API key for creating per-thread sessions
+        self._api_key = binance_client._session.headers.get("X-MBX-APIKEY", "")
+        self._base_url = binance_client._base_url
+        self._timeout_s = binance_client._timeout_s
+
+    def _get_session(self) -> "requests.Session":
+        """Get or create a thread-local requests.Session."""
+        import requests as _requests
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = _requests.Session()
+            session.headers.update({"X-MBX-APIKEY": self._api_key})
+            self._thread_local.session = session
+        return session
 
     def fetch_candles(
         self,
@@ -119,17 +140,15 @@ class MarketDataLayer:
                 if now - ts < self._cache_ttl_s:
                     return candles
 
-        # 2. Fetch from exchange WITHOUT holding the lock
+        # 2. Fetch from exchange WITHOUT holding the lock.
+        # Uses thread-local session (each thread has its own connection pool).
         try:
-            with self._lock:
-                session = self._client._session
-                base_url = self._client._base_url
-                timeout = self._client._timeout_s
+            session = self._get_session()
 
             response = session.get(
-                f"{base_url}/fapi/v1/klines",
+                f"{self._base_url}/fapi/v1/klines",
                 params={"symbol": symbol, "interval": interval, "limit": limit},
-                timeout=timeout,
+                timeout=self._timeout_s,
             )
             response.raise_for_status()
             raw = response.json()
@@ -161,15 +180,12 @@ class MarketDataLayer:
     def fetch_funding_rate(self, symbol: str) -> float:
         """Fetch the current funding rate for a symbol."""
         try:
-            with self._lock:
-                session = self._client._session
-                base_url = self._client._base_url
-                timeout = self._client._timeout_s
+            session = self._get_session()
 
             response = session.get(
-                f"{base_url}/fapi/v1/fundingRate",
+                f"{self._base_url}/fapi/v1/fundingRate",
                 params={"symbol": symbol, "limit": 1},
-                timeout=timeout,
+                timeout=self._timeout_s,
             )
             response.raise_for_status()
             data = response.json()

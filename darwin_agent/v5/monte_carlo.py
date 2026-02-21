@@ -1,15 +1,21 @@
 """
-Darwin v5 — Monte Carlo Validation.
+Darwin v5 — Monte Carlo Validation (Institutional Grade).
 
-Runs simulated random sequences on factor outputs to produce a
-distribution of outcomes and assess strategy risk-adjusted edge.
+Validates whether a trading strategy has a statistically significant edge
+using bootstrap resampling (not shuffle/permutation).
 
-Evaluates the last N bars of factor scores to determine whether
-the signal generator has a statistically significant edge.
+KEY FIX: The old implementation shuffled the same PnL vector.
+  sum(shuffled) == sum(original) ALWAYS, so edge_ratio ≈ 0 ALWAYS.
+  It only tested path-dependence (drawdown ordering), NOT signal quality.
+
+NEW: Bootstrap resampling (sample WITH REPLACEMENT) creates different
+  trade sequences each simulation. Each has a DIFFERENT total PnL,
+  allowing a proper test of whether the actual PnL is statistically
+  extreme vs what random trading would produce.
 
 Usage:
     mc = MonteCarloValidator()
-    result = mc.validate(factor_scores, n_simulations=1000)
+    result = mc.validate(trade_pnls, signal_confidences)
     if result.has_edge:
         # strategy shows positive expected value
 """
@@ -54,8 +60,16 @@ class MonteCarloResult:
 
     @property
     def has_edge(self) -> bool:
-        """Whether the strategy shows statistically significant edge."""
-        return self.edge_ratio > 0.1 and self.percentile_rank > 0.5
+        """Whether the strategy shows statistically significant edge.
+
+        Requires BOTH conditions:
+        1. edge_ratio > 0.1 (actual PnL is meaningfully above random mean)
+        2. percentile_rank > 0.70 (actual PnL beats 70%+ of random sequences)
+
+        The old threshold of 0.50 was too loose — a coinflip beats 50%.
+        At 0.70 we have reasonable confidence the edge isn't luck.
+        """
+        return self.edge_ratio > 0.1 and self.percentile_rank > 0.70
 
     def to_dict(self) -> Dict[str, float]:
         return {
@@ -81,14 +95,14 @@ class MonteCarloValidator:
     """
     Monte Carlo validation for signal quality.
 
-    Takes historical factor outputs (signal scores and resulting PnLs)
-    and runs random permutations to assess whether the signal generator
-    has a statistically significant edge over random.
+    Uses BOOTSTRAP RESAMPLING (not shuffle/permutation) to generate
+    synthetic random-entry strategies, then compares actual performance
+    against the bootstrap distribution.
 
     Process:
-        1. Collect actual signal → PnL mapping
-        2. Randomly shuffle the PnL assignments N times
-        3. Compare actual cumulative PnL to random distribution
+        1. Take actual trade PnL sequence → compute cumulative PnL
+        2. For N simulations: resample trades WITH REPLACEMENT
+        3. Compare actual cumulative PnL to bootstrap distribution
         4. Compute edge ratio and percentile rank
 
     Parameters
@@ -141,18 +155,21 @@ class MonteCarloValidator:
         random_win_rates: List[float] = []
 
         for _ in range(cfg.n_simulations):
-            shuffled = list(pnls)
-            self._rng.shuffle(shuffled)
+            # Bootstrap: sample WITH REPLACEMENT from empirical PnL distribution.
+            # Unlike shuffle (which reorders the same trades → identical sum),
+            # bootstrap creates DIFFERENT trade sequences with different totals.
+            # This tests: "is my total PnL unusual vs what random entries would get?"
+            bootstrap_sample = self._rng.choices(pnls, k=n_trades)
 
-            cum_pnl = sum(shuffled)
+            cum_pnl = sum(bootstrap_sample)
             random_pnls.append(cum_pnl)
 
-            # Max drawdown of shuffled sequence
-            dd = self._max_drawdown(shuffled)
+            # Max drawdown of bootstrap sequence
+            dd = self._max_drawdown(bootstrap_sample)
             random_drawdowns.append(dd)
 
-            # Win rate (same as actual since we just shuffle)
-            wr = sum(1 for p in shuffled if p > 0) / n_trades
+            # Win rate of this bootstrap sample (varies because of replacement)
+            wr = sum(1 for p in bootstrap_sample if p > 0) / n_trades
             random_win_rates.append(wr)
 
         # Statistics

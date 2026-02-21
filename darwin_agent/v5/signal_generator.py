@@ -68,7 +68,12 @@ class SignalConfig:
     residual_alpha_weight: float = 0.25
     funding_carry_weight: float = 0.20
     # Thresholds
-    confidence_threshold: float = 0.60
+    # confidence = sigmoid(|combined_z_score|) where sigmoid(x) = 1/(1+exp(-5*(x-0.5)))
+    # Mapping: z=0.41 → conf=0.60 | z=0.60 → conf=0.72 | z=0.80 → conf=0.82
+    # At 0.60, a z-score of 0.41 std devs triggers a trade — that's noise.
+    # At 0.72, z-score must be ≥0.60 — requires meaningful factor agreement.
+    # The engine further overrides this per-regime: 0.72 trending, 0.78 ranging.
+    confidence_threshold: float = 0.72
     momentum_lookbacks: List[int] = field(default_factory=lambda: [20, 50, 100])
     # Mean reversion
     mr_z_score_threshold: float = 1.5  # z-score must exceed this for MR signal
