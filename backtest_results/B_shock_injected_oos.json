@@ -1,0 +1,91 @@
+{
+  "oos_mean_return": 5.83,
+  "oos_runs": 3,
+  "oos_total_tests": 9,
+  "is_mean_fitness": 0.7155,
+  "degradation_pct": 22.0,
+  "overfit_flag": false,
+  "per_genome": [
+    {
+      "genome_idx": 0,
+      "run": 0,
+      "is_fitness": 0.7249,
+      "oos_pnl": 2.22,
+      "oos_trades": 21,
+      "oos_win_rate": 0.5714285714285714,
+      "oos_capital": 35.55
+    },
+    {
+      "genome_idx": 1,
+      "run": 0,
+      "is_fitness": 0.7152,
+      "oos_pnl": -1.4,
+      "oos_trades": 20,
+      "oos_win_rate": 0.55,
+      "oos_capital": 31.93
+    },
+    {
+      "genome_idx": 2,
+      "run": 0,
+      "is_fitness": 0.7064,
+      "oos_pnl": 2.39,
+      "oos_trades": 16,
+      "oos_win_rate": 0.5625,
+      "oos_capital": 35.72
+    },
+    {
+      "genome_idx": 0,
+      "run": 1,
+      "is_fitness": 0.7249,
+      "oos_pnl": -2.46,
+      "oos_trades": 18,
+      "oos_win_rate": 0.3333333333333333,
+      "oos_capital": 30.88
+    },
+    {
+      "genome_idx": 1,
+      "run": 1,
+      "is_fitness": 0.7152,
+      "oos_pnl": 6.15,
+      "oos_trades": 21,
+      "oos_win_rate": 0.8095238095238095,
+      "oos_capital": 39.49
+    },
+    {
+      "genome_idx": 2,
+      "run": 1,
+      "is_fitness": 0.7064,
+      "oos_pnl": 5.04,
+      "oos_trades": 17,
+      "oos_win_rate": 0.47058823529411764,
+      "oos_capital": 38.37
+    },
+    {
+      "genome_idx": 0,
+      "run": 2,
+      "is_fitness": 0.7249,
+      "oos_pnl": -3.55,
+      "oos_trades": 19,
+      "oos_win_rate": 0.3684210526315789,
+      "oos_capital": 29.78
+    },
+    {
+      "genome_idx": 1,
+      "run": 2,
+      "is_fitness": 0.7152,
+      "oos_pnl": -0.79,
+      "oos_trades": 21,
+      "oos_win_rate": 0.5238095238095238,
+      "oos_capital": 32.55
+    },
+    {
+      "genome_idx": 2,
+      "run": 2,
+      "is_fitness": 0.7064,
+      "oos_pnl": 9.88,
+      "oos_trades": 16,
+      "oos_win_rate": 0.75,
+      "oos_capital": 43.22
+    }
+  ]
+}

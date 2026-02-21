@@ -1,0 +1,89 @@
+{
+  "ecosystem_health": 4.18,
+  "ecosystem_grade": "D",
+  "weights_used": {
+    "risk_stability": 0.25,
+    "evolution_health": 0.2,
+    "concentration_risk": 0.15,
+    "shock_resilience": 0.2,
+    "learning_quality": 0.2
+  },
+  "scores": {
+    "risk_stability": {
+      "score": 1.45,
+      "grade": "F",
+      "components": {
+        "drawdown_control": 0.0,
+        "state_stability": 0.2,
+        "loss_control": 5.395,
+        "dd_consistency": 1.6298
+      },
+      "commentary": "High risk detected. Max drawdown 40.5%, only 1/50 generations in normal state. Risk parameters need significant adjustment."
+    },
+    "evolution_health": {
+      "score": 5.46,
+      "grade": "C",
+      "components": {
+        "diversity": 3.7791,
+        "lineage_balance": 3.7385,
+        "no_stagnation": 10.0,
+        "entropy": 4.4824
+      },
+      "commentary": "Evolution adequate but showing signs of convergence. Diversity at 0.38. Consider increasing mutation rate."
+    },
+    "concentration_risk": {
+      "score": 8.11,
+      "grade": "B",
+      "components": {
+        "capital_equality": 9.7168,
+        "exposure_spread": 5.4182,
+        "no_monopoly": 10.0,
+        "dominance_safety": 6.7168
+      },
+      "commentary": "Well-distributed capital and exposure. Gini 0.03, exposure HHI 0.46."
+    },
+    "shock_resilience": {
+      "score": 2.75,
+      "grade": "F",
+      "components": {
+        "capital_preservation": 2.1707,
+        "recovery_rate": 0.2,
+        "worst_gen_survival": 6.93,
+        "no_halts": 1.6
+      },
+      "commentary": "Poor shock resilience. Capital at 57% of start, worst gen loss 9.2%, only 8/50 without halts. Circuit breakers may need recalibration."
+    },
+    "learning_quality": {
+      "score": 4.77,
+      "grade": "D",
+      "components": {
+        "fitness_trend": 2.3473,
+        "win_rate_trend": 3.5088,
+        "sharpe_trend": 4.7603,
+        "trade_activity": 10.0
+      },
+      "commentary": "Minimal learning. Fitness trend -0.0053/gen, only 17.7 trades/agent/gen. Agents may not be generating enough signals or the fitness landscape may be too flat."
+    }
+  },
+  "context": {
+    "generations_evaluated": 50,
+    "starting_capital": 100.0,
+    "final_capital": 57.24,
+    "capital_return_pct": -42.76,
+    "total_alerts": 12,
+    "critical_alerts": [
+      "EXPOSURE_CONCENTRATION: BTCUSDT=86%",
+      "EXPOSURE_CONCENTRATION: SOLUSDT=100%",
+      "EXPOSURE_CONCENTRATION: SOLUSDT=74%",
+      "EXPOSURE_CONCENTRATION: SOLUSDT=100%",
+      "EXPOSURE_CONCENTRATION: SOLUSDT=100%",
+      "LINEAGE_DOMINANCE: 1189fad0a9f1=58% of population",
+      "EXPOSURE_CONCENTRATION: ETHUSDT=100%",
+      "EXPOSURE_CONCENTRATION: ETHUSDT=100%",
+      "EXPOSURE_CONCENTRATION: ETHUSDT=100%",
+      "EXPOSURE_CONCENTRATION: ETHUSDT=100%",
+      "EXPOSURE_CONCENTRATION: BTCUSDT=100%",
+      "EXPOSURE_CONCENTRATION: SOLUSDT=100%"
+    ]
+  }
+}
