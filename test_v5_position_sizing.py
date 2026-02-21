@@ -152,24 +152,23 @@ class TestDailyLossCap:
         """Daily loss exceeding cap throttles sizing."""
         config = SizerConfig(daily_loss_cap_pct=3.0, daily_loss_throttle=0.25)
         sizer = PositionSizer(config)
-        sizer.reset_daily(1000.0)
-        sizer.record_trade_pnl(-35.0)  # 3.5% loss
 
+        # Pass daily PnL directly to compute() — the engine tracks daily state
         result = sizer.compute(
             equity=965.0, price=50000.0, realized_vol=0.02,
             drawdown_pct=3.5, regime_multiplier=1.0, signal_confidence=1.0,
+            daily_pnl=-35.0, daily_start_equity=1000.0,  # 3.5% daily loss
         )
         assert result.daily_loss_scale == 0.25
 
     def test_no_throttle_within_cap(self):
         """No throttle when daily loss is within cap."""
         sizer = PositionSizer(SizerConfig(daily_loss_cap_pct=3.0))
-        sizer.reset_daily(1000.0)
-        sizer.record_trade_pnl(-10.0)  # 1% loss
 
         result = sizer.compute(
             equity=990.0, price=50000.0, realized_vol=0.02,
             drawdown_pct=1.0, regime_multiplier=1.0, signal_confidence=1.0,
+            daily_pnl=-10.0, daily_start_equity=1000.0,  # 1% daily loss (within cap)
         )
         assert result.daily_loss_scale == 1.0
 

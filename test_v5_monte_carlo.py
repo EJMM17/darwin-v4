@@ -115,26 +115,34 @@ class TestMonteCarloValidation:
             actual_pnl=50.0,
             mean_random_pnl=45.0,
             edge_ratio=0.5,
-            percentile_rank=0.7,
+            percentile_rank=0.85,
         )
         d = result.to_dict()
         assert d["n_simulations"] == 100
         assert d["actual_pnl"] == 50.0
-        assert d["has_edge"] is True  # edge_ratio > 0.1 and percentile_rank > 0.5
+        assert d["has_edge"] is True  # edge_ratio > 0.1 and percentile_rank > 0.70
 
     def test_has_edge_property(self):
         """has_edge logic works correctly."""
-        # Has edge: positive ratio + high percentile
-        result = MonteCarloResult(edge_ratio=0.5, percentile_rank=0.7)
+        # Has edge: positive ratio + high percentile (above 0.70 threshold)
+        result = MonteCarloResult(edge_ratio=0.5, percentile_rank=0.85)
         assert result.has_edge is True
 
         # No edge: low ratio
-        result = MonteCarloResult(edge_ratio=0.05, percentile_rank=0.7)
+        result = MonteCarloResult(edge_ratio=0.05, percentile_rank=0.85)
         assert result.has_edge is False
 
-        # No edge: low percentile
+        # No edge: low percentile (below 0.70 threshold)
         result = MonteCarloResult(edge_ratio=0.5, percentile_rank=0.3)
         assert result.has_edge is False
+
+        # Edge case: exactly at boundary (0.70 is NOT > 0.70)
+        result = MonteCarloResult(edge_ratio=0.5, percentile_rank=0.70)
+        assert result.has_edge is False
+
+        # Just above boundary
+        result = MonteCarloResult(edge_ratio=0.5, percentile_rank=0.71)
+        assert result.has_edge is True
 
 
 class TestConfidenceDistribution:

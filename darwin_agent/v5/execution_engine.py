@@ -40,6 +40,19 @@ class ExecutionConfig:
     max_book_impact_pct: float = 30.0   # order notional < 30% of visible book
     # Emergency close retries (more aggressive than normal orders)
     emergency_max_retries: int = 5
+    # Maker vs Taker order preference
+    # "LIMIT_ENTRY": Use LIMIT for entries (maker rebate), MARKET for exits (guaranteed fill)
+    # "MARKET": Always MARKET (current behavior)
+    #
+    # Fee impact at VIP0:
+    #   MARKET round-trip: 0.04% + 0.04% = 0.08% cost per trade
+    #   LIMIT entry + MARKET exit: -0.02% + 0.04% = 0.02% cost per trade
+    #   Savings per trade: 0.06% — at 20 trades/day = 1.2%/day recaptured
+    preferred_entry_type: str = "LIMIT_ENTRY"
+    # For LIMIT orders: how many basis points inside best bid/ask
+    limit_offset_bps: float = 1.0
+    # Max seconds to wait for LIMIT fill before falling back to MARKET
+    limit_fill_timeout_s: float = 5.0
 
 
 @dataclass(slots=True)
