@@ -372,6 +372,14 @@ class BinanceFuturesClient:
         Place a TAKE_PROFIT_MARKET order on Binance that lives on the exchange.
 
         Server-side take profit: executes even if our bot is down.
+
+        IMPORTANT: Uses quantity + reduceOnly instead of closePosition.
+        Binance only allows ONE closePosition=true order per symbol/side.
+        Since the SL already uses closePosition=true (critical protection),
+        the TP must use explicit quantity + reduceOnly=true instead.
+
+        If we used closePosition=true here too, Binance rejects the TP
+        with error -2021 and the position runs without a server-side TP.
         """
         params: dict[str, Any] = {
             "symbol": symbol,
@@ -379,11 +387,9 @@ class BinanceFuturesClient:
             "type": "TAKE_PROFIT_MARKET",
             "stopPrice": self._format_price(symbol, stop_price),
             "workingType": "MARK_PRICE",
+            "quantity": self._format_quantity(symbol, quantity),
+            "reduceOnly": "true",
         }
-        if reduce_only:
-            params["closePosition"] = "true"
-        else:
-            params["quantity"] = self._format_quantity(symbol, quantity)
 
         payload = self._signed_request_with_retry("POST", "/fapi/v1/order", params)
         order_id = str(payload.get("orderId", ""))

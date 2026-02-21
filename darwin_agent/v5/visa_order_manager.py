@@ -192,11 +192,13 @@ class VISAOrderManager:
             self._total_tp_placed += 1
         except Exception as exc:
             self._total_placement_failures += 1
-            logger.warning(
-                "VISA: TP placement failed for %s at %.4f (SL is active): %s",
+            logger.error(
+                "VISA: TP placement FAILED for %s at %.4f (SL is active, TP missing!): %s",
                 symbol, tp_price, exc,
             )
-            # Non-fatal: SL is in place, we just won't auto-TP on the exchange
+            # Non-fatal: SL is in place, but without server-side TP the bot
+            # must close via client-side TP check (5s polling latency).
+            # The position WILL eventually TP but with up to 5s delay.
 
         self._orders[symbol] = pair
 
