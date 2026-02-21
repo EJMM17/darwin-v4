@@ -295,6 +295,35 @@ class PositionSizer:
             )
             return result
 
+        # Liquidation distance guard: ensure notional doesn't push us too
+        # close to liquidation. With leverage L, liquidation happens at
+        # ~(1/L) = 20% move against the position (minus fees/maintenance).
+        # We enforce that total exposure (existing + new) stays below
+        # a safety margin: max 80% of the theoretical liquidation notional.
+        # This prevents a single wick from triggering margin call.
+        if cfg.leverage > 1 and equity > 0:
+            liq_distance_pct = (1.0 / cfg.leverage) * 100.0  # e.g. 20% at 5x
+            safety_margin = 0.80  # only use 80% of theoretical max
+            max_safe_exposure = equity * cfg.leverage * safety_margin
+            total_after = current_exposure + notional
+            if total_after > max_safe_exposure:
+                allowed = max(0, max_safe_exposure - current_exposure)
+                if allowed < cfg.min_notional_usdt:
+                    result.approved = False
+                    result.rejection_reason = (
+                        f"liquidation_guard: total_exposure ${total_after:.0f} "
+                        f"> safe_max ${max_safe_exposure:.0f} "
+                        f"(liq_dist={liq_distance_pct:.0f}%)"
+                    )
+                    return result
+                # Reduce position to fit within safe exposure
+                notional = allowed
+                quantity = notional / price
+                if step_size > 0:
+                    quantity = _math.floor(quantity / step_size) * step_size
+                    notional = quantity * price
+                position_size = notional
+
         result.position_size_usdt = position_size
         result.quantity = quantity
         result.risk_pct_used = (position_size / equity) * 100.0 if equity > 0 else 0.0

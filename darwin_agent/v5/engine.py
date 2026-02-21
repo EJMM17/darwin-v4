@@ -650,6 +650,10 @@ class DarwinV5Engine:
         1. Dynamic SL: max(fixed_sl_pct, atr_multiplier * ATR%) — adapts to volatility
         2. Trailing stop: once profit > activation threshold, trail at distance below peak
         3. Post-loss cooldown: after a SL, suppress new entries for N ticks
+
+        CRITICAL: Close orders retry aggressively. A failed SL close during a
+        wick leaves the position bleeding with leverage. We retry up to 3 times
+        with short backoff, then log CRITICAL so the operator can intervene.
         """
         if not positions:
             return
@@ -672,7 +676,24 @@ class DarwinV5Engine:
                 current_price = await asyncio.to_thread(
                     self._binance.get_current_price, symbol
                 )
-            except Exception:
+            except Exception as exc:
+                # Price fetch failed — use unrealized PnL from the position data
+                # as a safety net instead of silently skipping the SL check.
+                upnl = float(pos.get("unRealizedProfit", 0.0))
+                notional = abs(amt) * entry_price
+                if notional > 0 and upnl < 0:
+                    implied_loss_pct = abs(upnl) / notional
+                    # Emergency close if unrealized loss exceeds 2x our max SL
+                    max_sl = max(cfg.sl_pct_trending, cfg.sl_pct_ranging) / 100.0
+                    if implied_loss_pct >= max_sl * 2.0:
+                        logger.critical(
+                            "%s EMERGENCY: price fetch failed but uPnL=$%.2f (%.1f%% loss). "
+                            "Attempting blind close. error=%s",
+                            symbol, upnl, implied_loss_pct * 100, exc,
+                        )
+                        await self._emergency_close(symbol, amt, entry_price, cfg)
+                else:
+                    logger.warning("%s price fetch failed, skipping SL check: %s", symbol, exc)
                 continue
 
             if current_price <= 0:
@@ -708,8 +729,6 @@ class DarwinV5Engine:
             is_ranging_pos = current_regime_val in ("range_bound", "low_vol")
 
             if is_ranging_pos:
-                # En lateral: SL/TP más ajustados para capturar moves pequeños
-                # Ratio 1.5:1 (vs 2:1 en tendencia) — adecuado para rango
                 sl_floor = cfg.sl_pct_ranging / 100.0
                 tp_pct   = cfg.tp_pct_ranging / 100.0
             else:
@@ -722,17 +741,13 @@ class DarwinV5Engine:
             # ── Layer 2: Trailing stop ─────────────────────────────────────
             trail_sl = None
             if cfg.trailing_stop_enabled and pnl_pct > 0:
-                # Update peak profit seen for this position
                 peak_key = symbol
                 prev_peak = self._state.trailing_peaks.get(peak_key, 0.0)
                 new_peak = max(prev_peak, pnl_pct)
                 self._state.trailing_peaks[peak_key] = new_peak
 
-                # Once profit crosses activation threshold, set trailing SL
                 if new_peak >= cfg.trailing_activation_pct / 100.0:
                     trail_sl = new_peak - cfg.trailing_distance_pct / 100.0
-                    # Trailing SL is only triggered when PnL falls below it
-                    # (trail_sl could be negative if we gave back a lot)
 
             # ── Determine close reason ─────────────────────────────────────
             close_reason = ""
@@ -758,32 +773,69 @@ class DarwinV5Engine:
                 close_side, symbol, close_qty, close_reason, entry_price, current_price,
             )
 
-            close_order = V5OrderRequest(
-                symbol=symbol,
-                side=close_side,
-                quantity=close_qty,
-                price=current_price,
-                leverage=cfg.leverage,
-                reduce_only=True,
-            )
+            # ── AGGRESSIVE CLOSE RETRY ─────────────────────────────────────
+            # A failed SL close during a wick is catastrophic with leverage.
+            # Retry up to 3 times with 0.5s backoff before giving up.
+            close_result = None
+            for close_attempt in range(3):
+                close_order = V5OrderRequest(
+                    symbol=symbol,
+                    side=close_side,
+                    quantity=close_qty,
+                    price=current_price,
+                    leverage=cfg.leverage,
+                    reduce_only=True,
+                )
 
-            result = await self._execution_engine.place_order(
-                close_order, dry_run=cfg.dry_run
-            )
+                close_result = await self._execution_engine.place_order(
+                    close_order, dry_run=cfg.dry_run
+                )
 
-            if result.success:
-                # PnL = price_diff * qty. Leverage affects margin, not PnL.
-                # Position qty from exchange already reflects full notional.
-                pnl_usdt = pnl_pct * entry_price * close_qty
+                if close_result.success:
+                    break
+
+                if close_attempt < 2:
+                    logger.warning(
+                        "%s close attempt %d/3 failed: %s — retrying in 0.5s",
+                        symbol, close_attempt + 1, close_result.error,
+                    )
+                    await asyncio.sleep(0.5)
+
+            if close_result and close_result.success:
+                # Use ACTUAL fill price for PnL, not the stale mark price.
+                # Market orders in volatile conditions can fill far from mark.
+                fill_price = close_result.avg_price if close_result.avg_price > 0 else current_price
+                actual_pnl_pct = (
+                    (fill_price - entry_price) / entry_price
+                    if is_long
+                    else (entry_price - fill_price) / entry_price
+                )
+                pnl_usdt = actual_pnl_pct * entry_price * close_result.filled_qty
+
                 self._position_sizer.record_trade_pnl(pnl_usdt)
                 self._state.trade_pnls.append(pnl_usdt)
-                # Feed trade to institutional performance analytics
                 self._analytics.record_trade(pnl_usdt=pnl_usdt, is_win=(pnl_usdt > 0))
-                self._portfolio_risk.record_trade(pnl_pct=pnl_pct)
+                self._portfolio_risk.record_trade(pnl_pct=actual_pnl_pct)
                 self._state.daily_pnl += pnl_usdt
 
+                # Re-read equity after close to prevent stale kill switch data
+                try:
+                    w, u = await asyncio.to_thread(self._binance.get_account_snapshot)
+                    self._state.wallet_balance = float(w)
+                    self._state.unrealized_pnl = float(u)
+                    self._state.equity = self._state.wallet_balance + self._state.unrealized_pnl
+                except Exception:
+                    pass  # next tick will refresh
+
+                # Log slippage vs expected
+                slippage_vs_mark = abs(fill_price - current_price) / current_price * 100
+                if slippage_vs_mark > 0.1:
+                    logger.warning(
+                        "%s close slippage: expected=%.2f filled=%.2f (%.2f%%)",
+                        symbol, current_price, fill_price, slippage_vs_mark,
+                    )
+
                 # ── Layer 3: Cooldown post-pérdida ────────────────────────
-                # If this was a stop loss (not TP or trailing), enforce cooldown
                 if "STOP_LOSS" in close_reason:
                     cooldown_expiry = tick + cfg.post_loss_cooldown_ticks
                     self._state.cooldown_until[symbol] = cooldown_expiry
@@ -795,18 +847,64 @@ class DarwinV5Engine:
                 self._telegram.notify_position_closed(
                     symbol=symbol,
                     pnl=pnl_usdt,
-                    pnl_pct=pnl_pct * 100.0,
+                    pnl_pct=actual_pnl_pct * 100.0,
                     reason=close_reason,
                     equity=self._state.equity,
                 )
                 logger.info(
-                    "position closed: %s pnl=%.4f (%+.2f%%) reason=%s",
-                    symbol, pnl_usdt, pnl_pct * 100.0, close_reason,
+                    "position closed: %s pnl=%.4f (%+.2f%%) reason=%s fill=%.2f",
+                    symbol, pnl_usdt, actual_pnl_pct * 100.0, close_reason, fill_price,
                 )
             else:
-                logger.error(
-                    "FAILED to close position %s: %s", symbol, result.error
+                # ALL 3 CLOSE ATTEMPTS FAILED — this is critical
+                logger.critical(
+                    "FAILED TO CLOSE %s AFTER 3 ATTEMPTS: %s | "
+                    "Position is UNPROTECTED with %dx leverage. "
+                    "Operator must intervene manually.",
+                    symbol, close_result.error if close_result else "no result",
+                    cfg.leverage,
                 )
+                self._telegram.send_message(
+                    f"CRITICAL: Failed to close {symbol} after 3 attempts!\n"
+                    f"Reason: {close_reason}\n"
+                    f"Error: {close_result.error if close_result else 'unknown'}\n"
+                    f"Position: {close_qty} @ {entry_price}\n"
+                    f"PnL: {pnl_pct*100:.2f}%\n"
+                    f"MANUAL INTERVENTION REQUIRED"
+                )
+
+    async def _emergency_close(
+        self, symbol: str, amt: float, entry_price: float, cfg: V5EngineConfig
+    ) -> None:
+        """Last-resort close when we can't even get the current price."""
+        close_side = "SELL" if amt > 0 else "BUY"
+        close_qty = abs(amt)
+        emergency_order = V5OrderRequest(
+            symbol=symbol,
+            side=close_side,
+            quantity=close_qty,
+            price=entry_price,  # best guess — MARKET order ignores this anyway
+            leverage=cfg.leverage,
+            reduce_only=True,
+        )
+        result = await self._execution_engine.place_order(
+            emergency_order, dry_run=cfg.dry_run
+        )
+        if result.success:
+            logger.critical(
+                "%s EMERGENCY CLOSE succeeded: filled %.6f @ %.2f",
+                symbol, result.filled_qty, result.avg_price,
+            )
+        else:
+            logger.critical(
+                "%s EMERGENCY CLOSE FAILED: %s — position is UNPROTECTED",
+                symbol, result.error,
+            )
+            self._telegram.send_message(
+                f"EMERGENCY CLOSE FAILED: {symbol}\n"
+                f"Error: {result.error}\n"
+                f"MANUAL INTERVENTION REQUIRED IMMEDIATELY"
+            )
 
     async def _process_symbol(self, symbol: str, btc_features: Any) -> None:
         """Process one symbol through the full pipeline."""
