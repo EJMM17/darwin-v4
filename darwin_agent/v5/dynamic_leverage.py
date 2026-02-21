@@ -44,7 +44,7 @@ logger = logging.getLogger("darwin.v5.dynamic_leverage")
 class DynamicLeverageConfig:
     """Tunable parameters for dynamic leverage."""
     # Leverage bounds
-    min_leverage: int = 2          # never go below 2x (pointless below)
+    min_leverage: int = 1          # allow 1x for extreme-vol assets (memecoins)
     max_leverage: int = 20         # Binance max for most pairs
     default_leverage: int = 5      # fallback when no signal
 

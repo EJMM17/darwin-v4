@@ -107,6 +107,8 @@ class SignalGenerator:
             "funding_carry": [],
         }
         self._max_history = 200
+        # Adaptive funding threshold: tracks recent abs funding rates
+        self._funding_history: List[float] = []
 
     def generate(
         self,
@@ -296,23 +298,39 @@ class SignalGenerator:
         symbol_momentum = sum(rocs) / len(rocs)
 
         # Demean vs BTC (market proxy) — §10.4 eq.477
-        # Only applies when the symbol is NOT BTC and BTC features are available
+        # Only applies when the symbol is NOT BTC and BTC features are available.
+        # Skip for extreme-volatility assets (memecoins like PIPPIN, RIVER):
+        # these have near-zero BTC correlation during hype cycles, so demeaning
+        # removes actual alpha rather than market beta.
+        # Detection: if the symbol's realized vol is >5x BTC's, it's likely
+        # a memecoin with independent price dynamics.
         if (
             btc_features is not None
             and features.symbol != "BTCUSDT"
             and getattr(btc_features, "roc_20", 0) != 0
         ):
-            btc_rocs = []
-            if btc_features.roc_20 != 0:
-                btc_rocs.append(btc_features.roc_20)
-            if btc_features.roc_50 != 0:
-                btc_rocs.append(btc_features.roc_50)
-            if btc_features.roc_100 != 0:
-                btc_rocs.append(btc_features.roc_100)
-            if btc_rocs:
-                btc_momentum = sum(btc_rocs) / len(btc_rocs)
-                # Residual momentum: symbol outperforming/underperforming market
-                symbol_momentum = symbol_momentum - btc_momentum
+            # Check if this asset is too volatile to meaningfully demean vs BTC
+            sym_vol = getattr(features, "realized_vol_20", 0.0)
+            btc_vol = getattr(btc_features, "realized_vol_20", 0.0)
+            vol_ratio = sym_vol / btc_vol if btc_vol > 1e-10 else 0.0
+
+            if vol_ratio < 5.0:
+                # Normal asset: demean vs BTC to extract residual momentum
+                btc_rocs = []
+                if btc_features.roc_20 != 0:
+                    btc_rocs.append(btc_features.roc_20)
+                if btc_features.roc_50 != 0:
+                    btc_rocs.append(btc_features.roc_50)
+                if btc_features.roc_100 != 0:
+                    btc_rocs.append(btc_features.roc_100)
+                if btc_rocs:
+                    btc_momentum = sum(btc_rocs) / len(btc_rocs)
+                    symbol_momentum = symbol_momentum - btc_momentum
+            else:
+                logger.debug(
+                    "%s skipping BTC demeaning: vol_ratio=%.1fx (memecoin regime)",
+                    features.symbol, vol_ratio,
+                )
 
         return symbol_momentum
 
@@ -374,8 +392,17 @@ class SignalGenerator:
 
         Positive residual = symbol outperforming BTC (bullish alpha).
         Negative = underperforming.
+
+        For extreme-vol assets (memecoins), BTC regression is meaningless
+        since they move independently. Returns 0.0 to avoid noise.
         """
         if btc_features is None or not features.returns or not btc_features.returns:
+            return 0.0
+
+        # Skip for memecoins: their returns have no BTC relationship
+        sym_vol = getattr(features, "realized_vol_20", 0.0)
+        btc_vol = getattr(btc_features, "realized_vol_20", 0.0)
+        if btc_vol > 1e-10 and sym_vol / btc_vol >= 5.0:
             return 0.0
 
         sym_returns = features.returns
@@ -409,13 +436,33 @@ class SignalGenerator:
 
         Extreme positive funding (longs pay shorts) → contrarian short signal.
         Extreme negative funding (shorts pay longs) → contrarian long signal.
+
+        Uses adaptive threshold: tracks recent funding rates per symbol to
+        avoid constant triggering on memecoins with structurally high funding
+        (1-5% daily). The threshold scales to the asset's own funding baseline.
         """
         cfg = self._config
-        if abs(funding_rate) < cfg.funding_extreme_threshold * 0.1:
+
+        # Adaptive threshold: use rolling mean of abs funding to set baseline.
+        # For BTC/ETH: avg abs funding ~0.0001, threshold stays near default.
+        # For memecoins: avg abs funding ~0.005, threshold scales up ~10x.
+        self._funding_history.append(abs(funding_rate))
+        if len(self._funding_history) > 100:
+            self._funding_history = self._funding_history[-100:]
+
+        if len(self._funding_history) >= 5:
+            avg_abs_funding = sum(self._funding_history) / len(self._funding_history)
+            # Threshold = max(default, 3x rolling average abs funding)
+            # This means funding must be 3x its own baseline to be "extreme"
+            adaptive_threshold = max(cfg.funding_extreme_threshold, 3.0 * avg_abs_funding)
+        else:
+            adaptive_threshold = cfg.funding_extreme_threshold
+
+        if abs(funding_rate) < adaptive_threshold * 0.1:
             return 0.0  # negligible funding
 
         # Invert: high positive funding = short opportunity (negative signal)
-        return -funding_rate / cfg.funding_extreme_threshold
+        return -funding_rate / adaptive_threshold
 
     def _get_regime_weights(
         self, regime: RegimeState, cfg: SignalConfig

@@ -31,7 +31,7 @@ class ExecutionConfig:
     max_retries: int = 2               # 2 retries (was 3) — scalping can't wait 14s total
     base_backoff_s: float = 2.0        # 2s base (was 1s) — gives Binance time to clear rate limits
     max_backoff_s: float = 30.0
-    slippage_tolerance_pct: float = 0.5
+    slippage_tolerance_pct: float = 0.5    # base tolerance; auto-scales for high-vol assets
     fill_timeout_s: float = 10.0
     min_notional_usdt: float = 5.0
     # Binance step sizes (common ones; fetched dynamically in production)
@@ -179,11 +179,14 @@ class ExecutionEngine:
         Prevents sending a MARKET order that would eat through the book
         and cause catastrophic slippage (e.g. a $500 order on a $200 book).
 
+        Uses 20 levels (not 5) to detect liquidity cliffs on thin memecoin
+        books where top-5 looks fine but levels 6-20 have nothing.
+
         Returns (safe, reason).
         """
         cfg = self._config
         try:
-            book = self._client.get_order_book_depth(symbol, limit=5)
+            book = self._client.get_order_book_depth(symbol, limit=20)
         except Exception:
             # If we can't check the book, allow the trade (fail-open for availability)
             return True, "book_check_failed"
@@ -192,7 +195,7 @@ class ExecutionEngine:
         if not levels:
             return True, "empty_book"
 
-        # Sum available liquidity in the top 5 levels
+        # Sum available liquidity across all visible levels
         total_liquidity = sum(
             float(level[0]) * float(level[1])
             for level in levels
@@ -209,6 +212,23 @@ class ExecutionEngine:
                 f"{impact_pct:.1f}% of visible book ${total_liquidity:.2f} "
                 f"(max {cfg.max_book_impact_pct}%)"
             )
+
+        # Liquidity cliff detection: if top-5 has >80% of total-20 liquidity,
+        # the book drops off sharply and slippage risk is elevated.
+        if len(levels) > 5:
+            top5_liq = sum(
+                float(level[0]) * float(level[1])
+                for level in levels[:5]
+                if len(level) >= 2
+            )
+            if total_liquidity > 0 and top5_liq / total_liquidity > 0.80:
+                # Reduce impact threshold to 15% on thin books
+                if impact_pct > cfg.max_book_impact_pct * 0.5:
+                    return False, (
+                        f"liquidity_cliff: top5={top5_liq:.0f} is "
+                        f"{top5_liq/total_liquidity*100:.0f}% of total={total_liquidity:.0f} "
+                        f"(order impact {impact_pct:.1f}%)"
+                    )
 
         return True, ""
 
@@ -341,13 +361,21 @@ class ExecutionEngine:
                     slippage_pct = abs(result.avg_price - order.price) / order.price * 100.0
                     result.slippage_bps = slippage_pct * 100.0
 
-                    # Check slippage tolerance
-                    if slippage_pct > cfg.slippage_tolerance_pct:
+                    # Adaptive slippage tolerance: for high-vol assets (memecoins),
+                    # use max(base_tolerance, 50% of ATR%) to avoid false alarms.
+                    # ATR info is passed via order metadata from the engine.
+                    atr_pct = order.metadata.get("atr_pct", 0.0)
+                    effective_tolerance = max(
+                        cfg.slippage_tolerance_pct,
+                        atr_pct * 50.0,  # 50% of ATR% (e.g., ATR=5% → tolerance=2.5%)
+                    )
+
+                    if slippage_pct > effective_tolerance:
                         logger.warning(
                             "high slippage on %s: %.2f%% (tolerance: %.2f%%)",
                             order.symbol,
                             slippage_pct,
-                            cfg.slippage_tolerance_pct,
+                            effective_tolerance,
                         )
 
                 return result

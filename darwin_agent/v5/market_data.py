@@ -564,6 +564,7 @@ def compute_range_context(
     highs: List[float],
     lows: List[float],
     window: int = 48,
+    atr_pct: float = 0.0,
 ) -> dict:
     """
     Detecta el rango de mercado (soporte/resistencia) para estrategias
@@ -576,9 +577,14 @@ def compute_range_context(
       - price_position: 0.0 = en soporte, 1.0 = en resistencia
       - near_support: True si precio está en el 20% inferior del rango
       - near_resistance: True si precio está en el 20% superior del rango
-      - is_ranging: True si el rango es comprimido (ADX bajo implícito)
+      - is_ranging: True si el rango es comprimido relative to the asset's vol
 
     Uso: Solo abrir longs cerca de soporte, cortos cerca de resistencia.
+
+    The is_ranging threshold adapts to the asset's volatility:
+      - BTC with ATR 0.8%: threshold = 5% (default)
+      - PIPPIN with ATR 10%: threshold = max(5%, 3 * 10%) = 30%
+    This prevents memecoins from never being classified as ranging.
     """
     n = min(len(closes), min(len(highs), len(lows)))
     if n < 10:
@@ -622,9 +628,12 @@ def compute_range_context(
     near_support    = price_position <= EDGE_ZONE
     near_resistance = price_position >= (1.0 - EDGE_ZONE)
 
-    # Mercado en rango si la amplitud es pequeña (< 5% en 48h)
-    # En tendencia el rango suele ser 8-15%+
-    is_ranging = range_pct < 0.05
+    # Mercado en rango si la amplitud es pequeña relative to the asset's volatility.
+    # For BTC (ATR ~0.8%): threshold = 5% (48h range < 5% = ranging)
+    # For memecoins (ATR ~10%): threshold = 30% (48h range < 30% = ranging for this asset)
+    # This allows memecoins to be classified as ranging during consolidation phases.
+    ranging_threshold = max(0.05, 3.0 * atr_pct) if atr_pct > 0 else 0.05
+    is_ranging = range_pct < ranging_threshold
 
     return {
         "range_high": range_high,

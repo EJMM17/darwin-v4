@@ -29,7 +29,7 @@ class SizerConfig:
     leverage: int = 5                    # max leverage (may be overridden by dynamic leverage)
     # Volatility scaling
     target_vol: float = 0.02            # target annualized vol (2%)
-    vol_scale_min: float = 0.5          # minimum vol scaling factor (floor para capital pequeño)
+    vol_scale_min: float = 0.25         # minimum vol scaling factor (lowered for memecoins)
     vol_scale_max: float = 1.5          # maximum vol scaling factor
     # Drawdown adaptive
     dd_threshold_pct: float = 5.0       # start reducing at 5% drawdown
@@ -252,8 +252,11 @@ class PositionSizer:
         # Use actual SL distance when provided, otherwise conservative fallback.
         # The SL distance comes from the engine (ATR-dynamic per regime).
         # Floor at 0.5% to prevent extreme sizing on very tight SLs.
+        # Cap at 5% to prevent catastrophic risk on extreme-vol assets (memecoins):
+        # with 10% ATR and 2x multiplier, SL = 20% → capped to 5%.
+        # At 5% SL with 2% risk: notional = equity * 2%/5% = 0.4x equity (safe).
         if sl_distance_pct > 0:
-            sl_for_sizing = max(0.005, sl_distance_pct)
+            sl_for_sizing = max(0.005, min(0.05, sl_distance_pct))
         else:
             # Fallback: use 1.5% (trending default) as conservative estimate
             sl_for_sizing = 0.015

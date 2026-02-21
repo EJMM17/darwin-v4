@@ -246,7 +246,33 @@ async def run_v5(logger: logging.Logger, dry_run: bool = False) -> int:
         return 1
 
     symbols = os.getenv("DARWIN_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")
-    symbols = [s.strip() for s in symbols if s.strip()]
+    symbols = [s.strip().upper() for s in symbols if s.strip()]
+
+    # Validate symbols exist on Binance before configuring the engine.
+    # Catches typos (e.g., "1000PIPPINUSDT" vs "PIPPINUSDT") at startup
+    # instead of failing mid-tick with cryptic API errors.
+    try:
+        valid_symbols = []
+        for sym in symbols:
+            try:
+                binance.get_current_price(sym)
+                valid_symbols.append(sym)
+            except Exception as sym_exc:
+                logger.error(
+                    "symbol validation FAILED for '%s': %s — removing from trading list",
+                    sym, sym_exc,
+                )
+        if not valid_symbols:
+            logger.error("no valid symbols remaining after validation")
+            binance.close()
+            telegram.close()
+            return 1
+        if len(valid_symbols) < len(symbols):
+            removed = set(symbols) - set(valid_symbols)
+            logger.warning("removed invalid symbols: %s", removed)
+        symbols = valid_symbols
+    except Exception as val_exc:
+        logger.warning("symbol validation skipped (non-fatal): %s", val_exc)
 
     config = V5EngineConfig(
         symbols=symbols,

@@ -114,6 +114,10 @@ class V5EngineConfig:
     # Si ATR < umbral, las fees erosionan el profit
     min_atr_pct_to_trade: float = 0.25
 
+    # Max SL distance cap: prevents catastrophic SL on extreme-vol assets (memecoins)
+    # With ATR=10% and atr_sl_multiplier=2.0, SL would be 20% — capped to 5%.
+    max_sl_distance_pct: float = 5.0
+
     # Leverage multiplier en lateral (reservado para uso futuro)
     leverage_multiplier_ranging: float = 0.5
 
@@ -232,8 +236,10 @@ class DarwinV5Engine:
         # VISA: server-side protective orders
         self._visa = VISAOrderManager(binance_client) if self._config.visa_enabled else None
         # Dynamic leverage: adaptive per-trade leverage
+        # min_leverage=1 allows the ATR ceiling to reduce leverage to 1x for
+        # extreme-vol assets (memecoins with 10%+ daily ATR).
         self._dynamic_leverage = DynamicLeverageManager(DynamicLeverageConfig(
-            min_leverage=2,
+            min_leverage=1,
             max_leverage=self._config.leverage,
             daily_loss_budget_pct=self._config.max_daily_loss_pct,
         ))
@@ -797,7 +803,9 @@ class DarwinV5Engine:
                 tp_pct   = cfg.tp_pct_trending / 100.0
 
             # Effective SL = max(config floor por régimen, ATR multiple)
+            # Cap at max_sl_distance_pct for extreme-vol assets (memecoins)
             sl_pct = max(sl_floor, cfg.atr_sl_multiplier * atr_pct)
+            sl_pct = min(sl_pct, cfg.max_sl_distance_pct / 100.0)
 
             # Dynamic R:R TP: if target_rr is set, compute TP from SL * ratio
             # This ensures the R:R is maintained regardless of volatility regime
@@ -1096,8 +1104,10 @@ class DarwinV5Engine:
         # GAP 4: Range context — solo operar en extremos del rango en lateral
         if is_ranging and len(features.closes) >= 10:
             from darwin_agent.v5.market_data import compute_range_context
+            symbol_atr_pct = features.atr_14 / features.close if features.close > 0 and features.atr_14 > 0 else 0.0
             rctx = compute_range_context(
-                features.closes, features.highs, features.lows, window=48
+                features.closes, features.highs, features.lows, window=48,
+                atr_pct=symbol_atr_pct,
             )
             if rctx["range_pct"] < 0.02:
                 # Rango demasiado estrecho (< 2%) — no hay espacio para el trade
@@ -1204,6 +1214,8 @@ class DarwinV5Engine:
         sl_floor = cfg.sl_pct_ranging / 100.0 if is_ranging else cfg.sl_pct_trending / 100.0
         atr_pct = features.atr_14 / features.close if features.close > 0 and features.atr_14 > 0 else 0.0
         sl_distance_for_sizing = max(sl_floor, cfg.atr_sl_multiplier * atr_pct)
+        # Cap SL distance to prevent catastrophic risk on extreme-vol assets
+        sl_distance_for_sizing = min(sl_distance_for_sizing, cfg.max_sl_distance_pct / 100.0)
 
         # 7b. DYNAMIC LEVERAGE — compute per-trade leverage
         # Adjusts leverage based on signal confidence, volatility, regime, and drawdown.
@@ -1278,6 +1290,7 @@ class DarwinV5Engine:
             quantity=size_result.quantity,
             price=features.close,
             leverage=dynamic_lev,
+            metadata={"atr_pct": atr_pct},
         )
 
         # 10. Execute
@@ -1349,6 +1362,8 @@ class DarwinV5Engine:
             tp_pct = cfg.tp_pct_trending / 100.0
 
         sl_pct = max(sl_floor, cfg.atr_sl_multiplier * atr_pct)
+        # Cap SL distance for extreme-vol assets (memecoins)
+        sl_pct = min(sl_pct, cfg.max_sl_distance_pct / 100.0)
 
         # Dynamic R:R TP (same logic as _manage_open_positions)
         if cfg.target_rr > 0:
