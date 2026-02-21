@@ -101,10 +101,12 @@ def run_tests():
     check("Sharpe 2.5 → sq > 0.7", bd.sharpe_quality > 0.7,
           f"got {bd.sharpe_quality:.4f}")
 
+    # v4.5: sq now blends Sharpe (40%) + Sortino (60%).
+    # Negative Sharpe with truly losing pnl_series → sq close to 0.
     bd2 = model.compute_breakdown(
-        realized_pnl=50.0, initial_capital=100.0, current_capital=150.0,
-        sharpe=-0.5, max_drawdown_pct=5, win_count=15, loss_count=5,
-        pnl_series=[3]*15 + [-1]*5,
+        realized_pnl=-20.0, initial_capital=100.0, current_capital=80.0,
+        sharpe=-0.5, max_drawdown_pct=5, win_count=5, loss_count=15,
+        pnl_series=[-2]*15 + [1]*5,
     )
     check("Negative Sharpe → sq = 0", bd2.sharpe_quality == 0.0,
           f"got {bd2.sharpe_quality:.4f}")

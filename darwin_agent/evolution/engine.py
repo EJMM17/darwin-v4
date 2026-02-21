@@ -160,6 +160,7 @@ class EvolutionEngine:
         "_gen_repo", "_dna_repo",
         "_pending_dna", "_fitness_model",
         "_last_breakdowns",
+        "_stagnation_counter", "_last_best_fitness",
     )
 
     def __init__(
@@ -190,6 +191,9 @@ class EvolutionEngine:
         self._fitness_model = RiskAwareFitness(fitness_config)
         # Dashboard access: breakdown per agent for the most recent generation
         self._last_breakdowns: Dict[str, FitnessBreakdown] = {}
+        # Adaptive mutation: track stagnation to boost mutation when stuck
+        self._stagnation_counter: int = 0
+        self._last_best_fitness: float = 0.0
 
     # ════════════════════════════════════════════════════════
     # IEvolutionEngine protocol
@@ -317,13 +321,24 @@ class EvolutionEngine:
         self._update_hall_of_fame(ranked)
 
         self._generation += 1
+
+        # ── 8. Adaptive mutation: track stagnation ─────────
+        # If best fitness hasn't improved for 5+ gens, mutation
+        # rate is boosted in mutate() to escape local optima.
+        if fitnesses[0] > self._last_best_fitness + 1e-4:
+            self._stagnation_counter = 0
+            self._last_best_fitness = fitnesses[0]
+        else:
+            self._stagnation_counter += 1
+
         logger.info(
             "gen %d evaluated: pop=%d best=%.4f avg=%.4f worst=%.4f "
-            "survivors=%d portfolio=%s",
+            "survivors=%d portfolio=%s stagnation=%d",
             snapshot.generation, snapshot.population_size,
             snapshot.best_fitness, snapshot.avg_fitness,
             snapshot.worst_fitness, snapshot.survivors,
             snapshot.metadata.get("portfolio_state", "?"),
+            self._stagnation_counter,
         )
 
         return snapshot
@@ -396,17 +411,40 @@ class EvolutionEngine:
         )
 
     def mutate(self, dna: DNAData, mutation_rate: float = 0.0) -> DNAData:
-        """Gaussian mutation with adaptive rate decay."""
-        rate = mutation_rate or (
+        """Gaussian mutation with adaptive stagnation pressure.
+
+        Standard GA mutation decays over time (exploration → exploitation).
+        But if fitness stagnates for 5+ generations, the population is stuck
+        in a local optimum. In that case we BOOST mutation rate by up to 3x
+        to escape.
+
+        This prevents the GA from converging on overfit solutions that
+        memorized the training data but can't generalize.
+        """
+        base_rate = mutation_rate or (
             self._base_mutation_rate * (self._mutation_decay ** self._generation)
         )
+
+        # Adaptive mutation pressure: boost rate when stagnating
+        # stagnation_counter is updated in evaluate_generation()
+        if self._stagnation_counter >= 5:
+            # Exponential boost capped at 3x: rate * (1 + 0.4 * stagnation)
+            stag_boost = min(3.0, 1.0 + 0.4 * (self._stagnation_counter - 4))
+            rate = min(0.8, base_rate * stag_boost)  # cap at 80% per-gene
+        else:
+            rate = base_rate
+
         mutated_genes = dict(dna.genes)
 
         for gene_name in sorted(mutated_genes.keys()):
             value = mutated_genes[gene_name]
             if random.random() < rate:
                 lo, hi = self._gene_ranges.get(gene_name, (0.0, 1.0))
-                spread = (hi - lo) * 0.15
+                # Adaptive spread: wider when stagnating (explore more)
+                base_spread = 0.15
+                if self._stagnation_counter >= 5:
+                    base_spread = min(0.35, 0.15 + 0.04 * self._stagnation_counter)
+                spread = (hi - lo) * base_spread
                 noise = random.gauss(0, spread)
                 mutated_genes[gene_name] = max(lo, min(hi, value + noise))
 

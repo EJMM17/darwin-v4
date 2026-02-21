@@ -294,6 +294,7 @@ class PortfolioRiskEngine:
         "_limits", "_state", "_equity", "_exposure", "_stats",
         "_lock", "_bus", "_halt_until", "_state_history",
         "_last_state_change", "_approval_seq",
+        "_equity_history", "_dd_velocity_window",
     )
 
     def __init__(
@@ -313,6 +314,11 @@ class PortfolioRiskEngine:
         self._last_state_change = _utcnow()
         # FIX #6: monotonic counter for post-hoc race detection
         self._approval_seq: int = 0
+        # Drawdown velocity circuit breaker: tracks recent equity snapshots
+        # to detect SPEED of drawdown, not just magnitude.
+        # A -25% drawdown over 1 month is manageable; -25% in 1 minute is fatal.
+        self._equity_history: Deque[float] = deque(maxlen=60)
+        self._dd_velocity_window: int = 10  # check velocity over last 10 ticks
 
     # ═════════════════════════════════════════════════════════
     # Public API — approve_order (sync + async variants)
@@ -414,6 +420,7 @@ class PortfolioRiskEngine:
     def update_equity(self, equity: float) -> None:
         """Sync path — called by AgentManager each tick."""
         self._equity.update(equity)
+        self._equity_history.append(equity)
         self._evaluate_state_transition()
 
     async def update_equity_async(self, equity: float) -> None:
@@ -541,6 +548,31 @@ class PortfolioRiskEngine:
                         reason, dd,
                     )
             return
+
+        # ── Drawdown velocity circuit breaker ──────────────────
+        # Flash crashes: detect when equity drops >5% within the
+        # velocity window (last ~10 ticks). This catches catastrophic
+        # events that absolute drawdown thresholds miss (e.g., a -5%
+        # move in 10 seconds during a Black Swan / flash crash).
+        if len(self._equity_history) >= self._dd_velocity_window:
+            window_start = self._equity_history[-self._dd_velocity_window]
+            if window_start > 0:
+                velocity_dd = (window_start - self._equity.current) / window_start * 100
+                if velocity_dd > 5.0:  # 5% drop in velocity window
+                    self._halt_until = _utcnow() + timedelta(
+                        minutes=limits.halt_duration_minutes,
+                    )
+                    self._transition_to(
+                        PortfolioRiskState.HALTED,
+                        f"VELOCITY_CIRCUIT_BREAKER: {velocity_dd:.1f}% in {self._dd_velocity_window} ticks",
+                    )
+                    logger.critical(
+                        "VELOCITY HALT: equity dropped %.1f%% in %d ticks "
+                        "(%.2f → %.2f), triggering emergency halt",
+                        velocity_dd, self._dd_velocity_window,
+                        window_start, self._equity.current,
+                    )
+                    return
 
         # ── Escalation (highest severity first) ──────────────
         if dd >= limits.halted_drawdown_pct:
