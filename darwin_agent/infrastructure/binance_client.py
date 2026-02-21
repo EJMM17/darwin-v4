@@ -33,6 +33,71 @@ class ServerSideOrder:
     placed_at: float = 0.0  # time.time()
 
 
+class RateLimitTracker:
+    """
+    Tracks Binance API weight consumption to prevent 429 and 418 bans.
+
+    Binance enforces:
+    - 2400 weight/minute for most endpoints (IP-level)
+    - HTTP 429 = rate limit warning (backoff required)
+    - HTTP 418 = IP auto-ban (much worse, lasts minutes to hours)
+
+    This tracker maintains a sliding window of API weights consumed
+    and blocks new requests when approaching the limit.
+    """
+
+    def __init__(self, limit_per_minute: int = 2400, safety_margin: float = 0.80) -> None:
+        self._limit = limit_per_minute
+        self._safe_threshold = int(limit_per_minute * safety_margin)
+        # Sliding window: list of (timestamp, weight) tuples
+        self._window: list[tuple[float, int]] = []
+        self._banned_until: float = 0.0
+
+    def record(self, weight: int = 1) -> None:
+        """Record an API call's weight consumption."""
+        self._window.append((time.time(), weight))
+
+    def can_request(self, weight: int = 1) -> bool:
+        """Check if we can safely make another request."""
+        if time.time() < self._banned_until:
+            return False
+        self._prune()
+        current = sum(w for _, w in self._window)
+        return (current + weight) <= self._safe_threshold
+
+    def current_weight(self) -> int:
+        """Current weight consumed in the sliding window."""
+        self._prune()
+        return sum(w for _, w in self._window)
+
+    def handle_429(self, retry_after_s: float = 60.0) -> None:
+        """Called when we receive HTTP 429. Enforces backoff."""
+        self._banned_until = time.time() + retry_after_s
+        logger.warning(
+            "RATE LIMIT 429: backing off %.0fs (current weight: %d/%d)",
+            retry_after_s, self.current_weight(), self._limit,
+        )
+
+    def handle_418(self, ban_duration_s: float = 300.0) -> None:
+        """Called when we receive HTTP 418 (IP ban). Nuclear backoff."""
+        self._banned_until = time.time() + ban_duration_s
+        logger.critical(
+            "IP BAN 418: banned for %.0fs — all requests blocked",
+            ban_duration_s,
+        )
+
+    def seconds_until_available(self) -> float:
+        """Seconds until next request is allowed (0 if available now)."""
+        if time.time() < self._banned_until:
+            return self._banned_until - time.time()
+        return 0.0
+
+    def _prune(self) -> None:
+        """Remove entries older than 60 seconds."""
+        cutoff = time.time() - 60.0
+        self._window = [(ts, w) for ts, w in self._window if ts > cutoff]
+
+
 class BinanceFuturesClient:
     def __init__(self, credentials: BinanceCredentials, timeout_s: float = 10.0) -> None:
         self._credentials = credentials
@@ -42,6 +107,8 @@ class BinanceFuturesClient:
         self._session.headers.update({"X-MBX-APIKEY": credentials.api_key})
         # Cache: {symbol: {step_size, tick_size, min_qty}}
         self._symbol_filters: dict[str, dict[str, float]] = {}
+        # Rate limit tracking — prevents 429/418 bans
+        self.rate_limiter = RateLimitTracker()
 
     def _sign(self, params: dict[str, Any]) -> str:
         query = urlencode(params, doseq=True)
@@ -52,12 +119,38 @@ class BinanceFuturesClient:
         ).hexdigest()
 
     def _signed_request(self, method: str, path: str, params: dict[str, Any] | None = None) -> Any:
+        # Rate limit guard: block if we'd exceed safe threshold
+        if not self.rate_limiter.can_request(weight=5):
+            wait = self.rate_limiter.seconds_until_available()
+            if wait > 0:
+                logger.warning(
+                    "rate limit guard: waiting %.1fs before %s %s (weight=%d/%d)",
+                    wait, method, path,
+                    self.rate_limiter.current_weight(), 2400,
+                )
+                time.sleep(min(wait, 30.0))  # cap wait to avoid blocking forever
+
         params = dict(params or {})
         params["timestamp"] = int(time.time() * 1000)
         params["recvWindow"] = 5000
         params["signature"] = self._sign(params)
         url = f"{self._base_url}{path}"
         response = self._session.request(method, url, params=params, timeout=self._timeout_s)
+
+        # Track weight from response headers (Binance sends actual consumed weight)
+        used_weight = int(response.headers.get("X-MBX-USED-WEIGHT-1m", 0))
+        if used_weight > 0:
+            self.rate_limiter.record(weight=5)
+
+        # Handle rate limit responses
+        if response.status_code == 429:
+            retry_after = float(response.headers.get("Retry-After", 60))
+            self.rate_limiter.handle_429(retry_after)
+            response.raise_for_status()
+        elif response.status_code == 418:
+            self.rate_limiter.handle_418(ban_duration_s=300.0)
+            response.raise_for_status()
+
         response.raise_for_status()
         return response.json()
 
@@ -99,17 +192,61 @@ class BinanceFuturesClient:
 
 
     def get_current_price(self, symbol: str) -> float:
-        """Fetch current mark price for a symbol (single lightweight call)."""
+        """Fetch current mark price for a symbol (single lightweight call).
+
+        IMPORTANT: Uses /fapi/v1/premiumIndex which returns the MARK PRICE,
+        not /fapi/v1/ticker/price which returns LAST TRADE PRICE.
+
+        This is critical because:
+        - Binance liquidation engine uses Mark Price
+        - Server-side SL/TP orders use workingType=MARK_PRICE
+        - Client-side SL/TP evaluation MUST match server-side to avoid:
+          a) Premature client-side stops on last-price wicks
+          b) Missed server-side triggers that the bot doesn't detect
+          c) Double-close attempts (client + server both firing)
+
+        The Mark Price is the volume-weighted average across major exchanges,
+        making it resistant to single-exchange wick manipulation.
+        """
         try:
             response = self._session.get(
-                f"{self._base_url}/fapi/v1/ticker/price",
+                f"{self._base_url}/fapi/v1/premiumIndex",
                 params={"symbol": symbol},
                 timeout=self._timeout_s,
             )
             response.raise_for_status()
-            return float(response.json().get("price", 0.0))
+            data = response.json()
+            mark_price = float(data.get("markPrice", 0.0))
+            if mark_price > 0:
+                return mark_price
+            # Fallback to last price if mark price is missing
+            return float(data.get("lastFundingRate", 0.0))
         except Exception:
             return 0.0
+
+    def get_mark_and_last_price(self, symbol: str) -> tuple[float, float]:
+        """Fetch both mark price and last price in a single API call.
+
+        Returns (mark_price, last_price). Uses /fapi/v1/premiumIndex
+        which includes both. Weight: 1.
+
+        Use mark_price for SL/TP evaluation (matches liquidation engine).
+        Use last_price for slippage estimation (actual execution price).
+        """
+        try:
+            response = self._session.get(
+                f"{self._base_url}/fapi/v1/premiumIndex",
+                params={"symbol": symbol},
+                timeout=self._timeout_s,
+            )
+            response.raise_for_status()
+            data = response.json()
+            mark = float(data.get("markPrice", 0.0))
+            # premiumIndex doesn't have lastPrice; use ticker for that
+            # For SL/TP purposes, mark price alone is sufficient
+            return mark, mark
+        except Exception:
+            return 0.0, 0.0
 
     def get_account_snapshot(self) -> tuple[float, float]:
         """

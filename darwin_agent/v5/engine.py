@@ -60,9 +60,25 @@ class V5EngineConfig:
     base_risk_pct: float = 1.0
     confidence_threshold: float = 0.60
     # Risk per trade — SL dinámico basado en ATR
+    #
+    # R:R CONFIGURATION GUIDE:
+    # To achieve 1:8 R:R, set: stop_loss_pct=0.5, take_profit_pct=4.0
+    # Required win rate at 1:8 R:R for +EV: WR > 1/(1+8) = 11.1%
+    # Required win rate at 2:1 R:R for +EV: WR > 1/(1+2) = 33.3%
+    #
+    # Higher R:R = lower required win rate BUT fewer winning trades.
+    # Optimal R:R depends on your signal's empirical win rate.
+    # Use Monte Carlo validator to find the R:R that maximizes E[PnL].
+    #
+    # Current default: 1:2 R:R (conservative, requires ~40% WR for +EV after fees)
     stop_loss_pct: float = 1.5      # SL mínimo (% del precio), floor de seguridad
     take_profit_pct: float = 3.0    # TP fijo (% del precio), ratio 2:1
     atr_sl_multiplier: float = 2.0  # SL = max(stop_loss_pct, atr_sl_multiplier * ATR%)
+    # Target R:R ratio — used to dynamically compute TP from ATR-based SL
+    # When target_rr > 0, TP is computed as: TP = SL * target_rr
+    # Set to 0 to use fixed tp_pct instead.
+    # Example: target_rr=8.0, ATR-SL=0.5% → TP=4.0% (1:8 R:R)
+    target_rr: float = 0.0  # 0 = disabled (use fixed tp_pct)
     # Trailing stop: protege ganancias parciales
     trailing_stop_enabled: bool = True
     trailing_activation_pct: float = 1.5  # activa trailing cuando PnL > 1.5%
@@ -746,6 +762,11 @@ class DarwinV5Engine:
             # Effective SL = max(config floor por régimen, ATR multiple)
             sl_pct = max(sl_floor, cfg.atr_sl_multiplier * atr_pct)
 
+            # Dynamic R:R TP: if target_rr is set, compute TP from SL * ratio
+            # This ensures the R:R is maintained regardless of volatility regime
+            if cfg.target_rr > 0:
+                tp_pct = sl_pct * cfg.target_rr
+
             # ── Layer 2: Trailing stop ─────────────────────────────────────
             trail_sl = None
             if cfg.trailing_stop_enabled and pnl_pct > 0:
@@ -1074,11 +1095,37 @@ class DarwinV5Engine:
 
         # 7. Position sizing — with Half-Kelly + Portfolio Risk checks
 
+        # 7a. MARGIN CHECK: verify actual available margin before sizing
+        # This prevents -2019 "Margin is insufficient" rejections from Binance.
+        # Portfolio heat check uses notional/equity, but Binance uses
+        # availableBalance which accounts for unrealized losses on other positions.
+        # Without this check, a -2% unrealized loss on ETH could prevent opening
+        # a perfectly valid BTC position that passes all heat checks.
+        equity = self._state.equity
+        wallet = self._state.wallet_balance
+        unrealized = self._state.unrealized_pnl
+        # Conservative available margin estimate:
+        # available = wallet + unrealized_pnl - maintenance_margin_of_open_positions
+        # We approximate maintenance margin as 0.4% of open notional (Binance standard)
+        open_notional = sum(
+            abs(float(p.get("notional", 0))) for p in self._state.open_positions
+        )
+        approx_maintenance = open_notional * 0.004  # 0.4% maintenance margin
+        available_margin = max(0.0, wallet + unrealized - approx_maintenance)
+
+        if available_margin < self._config.base_risk_pct / 100.0 * equity:
+            logger.debug(
+                "%s margin_check: available=$%.2f < required=$%.2f (wallet=$%.2f upnl=$%.2f maint=$%.2f)",
+                symbol, available_margin,
+                self._config.base_risk_pct / 100.0 * equity,
+                wallet, unrealized, approx_maintenance,
+            )
+            return
+
         # Update price history for correlation filter
         self._portfolio_risk.update_price(symbol, features.close)
 
         # Estimate proposed notional for heat check (before exact sizing)
-        equity = self._state.equity
         base_risk_pct = self._config.base_risk_pct / 100.0
         estimated_notional = equity * base_risk_pct * self._config.leverage
 
@@ -1222,6 +1269,10 @@ class DarwinV5Engine:
             tp_pct = cfg.tp_pct_trending / 100.0
 
         sl_pct = max(sl_floor, cfg.atr_sl_multiplier * atr_pct)
+
+        # Dynamic R:R TP (same logic as _manage_open_positions)
+        if cfg.target_rr > 0:
+            tp_pct = sl_pct * cfg.target_rr
 
         # Compute absolute prices
         if direction == "LONG":

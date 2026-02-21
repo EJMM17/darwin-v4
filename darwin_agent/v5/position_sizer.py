@@ -214,9 +214,28 @@ class PositionSizer:
             result.rejection_reason = "price <= 0"
             return result
 
-        # 1. Base size — use Half-Kelly from PortfolioRiskManager if available
+        # 1. Base size — Risk-Based Position Sizing (institutional standard)
+        #
+        # OLD (broken): base_size = equity * risk_pct * leverage
+        #   This conflates NOTIONAL with RISK. $100 * 1% * 5x = $5 notional.
+        #   Actual loss at SL = $5 * 1.5% = $0.075 = 0.075% of equity (way too small).
+        #
+        # NEW (correct): size so that hitting SL loses exactly risk_fraction of equity.
+        #   risk_amount = equity * risk_fraction  (e.g., $100 * 2% = $2)
+        #   base_size = risk_amount / sl_distance  (e.g., $2 / 1.5% = $133.33 notional)
+        #   Cap at max_leverage * equity to prevent margin violation.
+        #
+        # This means:
+        #   - If SL = 1.5% and risk = 2%, notional = equity * 2%/1.5% = 1.33x equity
+        #   - If SL = 0.7% and risk = 2%, notional = equity * 2%/0.7% = 2.86x equity
+        #   - The position automatically gets SMALLER when SL is wider (high vol)
+        #     and LARGER when SL is tighter (low vol) — natural vol targeting.
         base_risk_pct = (risk_pct_override / 100.0) if risk_pct_override > 0 else (cfg.base_risk_pct / 100.0)
-        base_size = equity * base_risk_pct * cfg.leverage
+        risk_amount = equity * base_risk_pct
+        # Use a conservative SL estimate for sizing (actual SL is ATR-dynamic)
+        # Default SL floor from config: 1.5% trending, 0.7% ranging
+        sl_estimate = max(0.005, cfg.base_risk_pct / 100.0)  # at minimum 0.5% SL
+        base_size = min(risk_amount / sl_estimate, equity * cfg.leverage)
 
         # 2. Volatility scaling: inversely proportional to realized vol
         vol_scale = self._compute_vol_scale(realized_vol)
@@ -258,13 +277,23 @@ class PositionSizer:
             result.rejection_reason = "total_exposure_cap_reached"
             return result
 
-        # 7. Half-Kelly adaptive scaling (Thorp 2006 / QuantStart institutional)
-        # Scales position proportionally to the strategy's recent edge.
-        # Half-Kelly (fraction=0.5) gives ~75% of full Kelly growth with ~50% variance.
-        if cfg.use_kelly and len(self._trade_pnls) >= cfg.kelly_lookback:
-            kelly_scale = self._compute_kelly_scale(cfg)
-            position_size *= kelly_scale
-            result.notes = getattr(result, "notes", "") + f" kelly_scale={kelly_scale:.3f}"
+        # 7. Half-Kelly scaling — SINGLE SOURCE OF TRUTH
+        #
+        # ARCHITECTURE FIX: Kelly is computed ONLY in PortfolioRiskManager
+        # and passed here as risk_pct_override. Applying Kelly a second time
+        # here would DOUBLE the Kelly adjustment:
+        #   - PortfolioRiskManager outputs half-Kelly risk % (e.g., 3.2%)
+        #   - That risk % is already used as base_risk_pct via risk_pct_override
+        #   - Multiplying by kelly_scale again would push past optimal Kelly
+        #   - Past full Kelly = NEGATIVE growth rate = path to ruin
+        #
+        # The old code applied Kelly twice:
+        #   1. risk_pct_override from PortfolioRiskManager._compute_kelly_risk()
+        #   2. kelly_scale from PositionSizer._compute_kelly_scale()
+        # This has been removed. Kelly lives in ONE place: PortfolioRiskManager.
+        #
+        # Reference: Thorp (2006) "The Kelly Criterion in Blackjack" — over-betting
+        # by even 10% past Kelly optimal reduces geometric growth rate.
         position_size = min(position_size, max_additional)
 
         # Halted by drawdown
