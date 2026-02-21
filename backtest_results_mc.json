@@ -1,0 +1,621 @@
+{
+  "n_seeds": 20,
+  "avg_return_pct": -0.33,
+  "avg_sharpe": -0.373,
+  "avg_win_rate": 37.1,
+  "avg_trades": 61.0,
+  "avg_max_dd": 1.92,
+  "pct_profitable": 35.0,
+  "best_return": 2.61,
+  "worst_return": -2.31,
+  "all_results": [
+    {
+      "initial_equity": 80.0,
+      "final_equity": 79.5621,
+      "total_return_pct": -0.55,
+      "total_pnl": -0.4379,
+      "total_fees": 0.439,
+      "fees_pct_of_gross": 5.7,
+      "n_trades": 57,
+      "win_rate_pct": 36.84,
+      "profit_factor": 0.892,
+      "avg_win": 0.1731,
+      "avg_loss": 0.1131,
+      "expectancy": -0.0077,
+      "sharpe_ratio": -0.274,
+      "sortino_ratio": -0.372,
+      "calmar_ratio": -0.237,
+      "max_drawdown_pct": 2.31,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "ETHUSDT": {
+          "trades": 1,
+          "win_rate": 0.0,
+          "pnl": -0.16223759263032,
+          "fees": 0.016587468430320003
+        },
+        "SOLUSDT": {
+          "trades": 56,
+          "win_rate": 37.5,
+          "pnl": -0.2756338934828046,
+          "fees": 0.42237657412403923
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 79.0057,
+      "total_return_pct": -1.24,
+      "total_pnl": -0.9943,
+      "total_fees": 0.2383,
+      "fees_pct_of_gross": 6.27,
+      "n_trades": 24,
+      "win_rate_pct": 33.33,
+      "profit_factor": 0.585,
+      "avg_win": 0.1752,
+      "avg_loss": 0.1498,
+      "expectancy": -0.0414,
+      "sharpe_ratio": -0.956,
+      "sortino_ratio": -1.098,
+      "calmar_ratio": -0.594,
+      "max_drawdown_pct": 2.09,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 24,
+          "win_rate": 33.33333333333333,
+          "pnl": -0.9942840123701561,
+          "fees": 0.23831698137016
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 79.5782,
+      "total_return_pct": -0.53,
+      "total_pnl": -0.4218,
+      "total_fees": 0.5599,
+      "fees_pct_of_gross": 6.18,
+      "n_trades": 77,
+      "win_rate_pct": 41.56,
+      "profit_factor": 0.911,
+      "avg_win": 0.1348,
+      "avg_loss": 0.1053,
+      "expectancy": -0.0055,
+      "sharpe_ratio": -0.352,
+      "sortino_ratio": -0.5,
+      "calmar_ratio": -0.351,
+      "max_drawdown_pct": 1.5,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "ETHUSDT": {
+          "trades": 42,
+          "win_rate": 42.857142857142854,
+          "pnl": -0.3786238104796484,
+          "fees": 0.2592691172507261
+        },
+        "SOLUSDT": {
+          "trades": 35,
+          "win_rate": 40.0,
+          "pnl": -0.04314388480119297,
+          "fees": 0.3005839970012001
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 79.85,
+      "total_return_pct": -0.19,
+      "total_pnl": -0.15,
+      "total_fees": 0.4099,
+      "fees_pct_of_gross": 6.05,
+      "n_trades": 44,
+      "win_rate_pct": 52.27,
+      "profit_factor": 0.957,
+      "avg_win": 0.144,
+      "avg_loss": 0.1649,
+      "expectancy": -0.0034,
+      "sharpe_ratio": -0.112,
+      "sortino_ratio": -0.153,
+      "calmar_ratio": -0.179,
+      "max_drawdown_pct": 1.05,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 44,
+          "win_rate": 52.27272727272727,
+          "pnl": -0.15003616887322652,
+          "fees": 0.40986021607103484
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 80.9013,
+      "total_return_pct": 1.13,
+      "total_pnl": 0.9013,
+      "total_fees": 0.6553,
+      "fees_pct_of_gross": 5.7,
+      "n_trades": 62,
+      "win_rate_pct": 46.77,
+      "profit_factor": 1.17,
+      "avg_win": 0.2137,
+      "avg_loss": 0.1605,
+      "expectancy": 0.0145,
+      "sharpe_ratio": 0.532,
+      "sortino_ratio": 0.797,
+      "calmar_ratio": 0.54,
+      "max_drawdown_pct": 2.09,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "ETHUSDT": {
+          "trades": 6,
+          "win_rate": 33.33333333333333,
+          "pnl": -0.9371217247331759,
+          "fees": 0.1159281680123837
+        },
+        "SOLUSDT": {
+          "trades": 56,
+          "win_rate": 48.214285714285715,
+          "pnl": 1.8384583231568528,
+          "fees": 0.5393323227794985
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 80.9673,
+      "total_return_pct": 1.21,
+      "total_pnl": 0.9673,
+      "total_fees": 0.5664,
+      "fees_pct_of_gross": 5.39,
+      "n_trades": 48,
+      "win_rate_pct": 41.67,
+      "profit_factor": 1.203,
+      "avg_win": 0.2867,
+      "avg_loss": 0.1703,
+      "expectancy": 0.0202,
+      "sharpe_ratio": 0.445,
+      "sortino_ratio": 0.701,
+      "calmar_ratio": 0.509,
+      "max_drawdown_pct": 2.38,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "ETHUSDT": {
+          "trades": 8,
+          "win_rate": 12.5,
+          "pnl": -1.274300862677252,
+          "fees": 0.13317797953725602
+        },
+        "SOLUSDT": {
+          "trades": 40,
+          "win_rate": 47.5,
+          "pnl": 2.241636064928113,
+          "fees": 0.4332277208634291
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 80.6802,
+      "total_return_pct": 0.85,
+      "total_pnl": 0.6802,
+      "total_fees": 1.0521,
+      "fees_pct_of_gross": 5.3,
+      "n_trades": 134,
+      "win_rate_pct": 41.79,
+      "profit_factor": 1.071,
+      "avg_win": 0.1833,
+      "avg_loss": 0.1229,
+      "expectancy": 0.0051,
+      "sharpe_ratio": 0.32,
+      "sortino_ratio": 0.515,
+      "calmar_ratio": 0.488,
+      "max_drawdown_pct": 1.74,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 134,
+          "win_rate": 41.7910447761194,
+          "pnl": 0.6801730968206942,
+          "fees": 1.0520994907760768
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 82.0865,
+      "total_return_pct": 2.61,
+      "total_pnl": 2.0865,
+      "total_fees": 1.7855,
+      "fees_pct_of_gross": 5.52,
+      "n_trades": 252,
+      "win_rate_pct": 43.65,
+      "profit_factor": 1.138,
+      "avg_win": 0.1566,
+      "avg_loss": 0.1066,
+      "expectancy": 0.0083,
+      "sharpe_ratio": 0.749,
+      "sortino_ratio": 1.357,
+      "calmar_ratio": 0.86,
+      "max_drawdown_pct": 3.03,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "ETHUSDT": {
+          "trades": 2,
+          "win_rate": 50.0,
+          "pnl": 0.02916110626512175,
+          "fees": 0.03835571093488001
+        },
+        "SOLUSDT": {
+          "trades": 250,
+          "win_rate": 43.6,
+          "pnl": 2.057350560253956,
+          "fees": 1.7471380318141914
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 79.8974,
+      "total_return_pct": -0.13,
+      "total_pnl": -0.1026,
+      "total_fees": 0.3121,
+      "fees_pct_of_gross": 5.35,
+      "n_trades": 30,
+      "win_rate_pct": 40.0,
+      "profit_factor": 0.965,
+      "avg_win": 0.2387,
+      "avg_loss": 0.1648,
+      "expectancy": -0.0034,
+      "sharpe_ratio": -0.088,
+      "sortino_ratio": -0.137,
+      "calmar_ratio": -0.102,
+      "max_drawdown_pct": 1.26,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 30,
+          "win_rate": 40.0,
+          "pnl": -0.10257924672392293,
+          "fees": 0.3121130105723695
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 78.3453,
+      "total_return_pct": -2.07,
+      "total_pnl": -1.6547,
+      "total_fees": 0.2831,
+      "fees_pct_of_gross": 5.18,
+      "n_trades": 30,
+      "win_rate_pct": 30.0,
+      "profit_factor": 0.535,
+      "avg_win": 0.2119,
+      "avg_loss": 0.1696,
+      "expectancy": -0.0552,
+      "sharpe_ratio": -1.209,
+      "sortino_ratio": -1.391,
+      "calmar_ratio": -0.911,
+      "max_drawdown_pct": 2.27,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 30,
+          "win_rate": 30.0,
+          "pnl": -1.6546753701679575,
+          "fees": 0.2831227781927754
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 78.4994,
+      "total_return_pct": -1.88,
+      "total_pnl": -1.5006,
+      "total_fees": 0.3596,
+      "fees_pct_of_gross": 5.67,
+      "n_trades": 51,
+      "win_rate_pct": 29.41,
+      "profit_factor": 0.617,
+      "avg_win": 0.1614,
+      "avg_loss": 0.1089,
+      "expectancy": -0.0294,
+      "sharpe_ratio": -1.241,
+      "sortino_ratio": -1.56,
+      "calmar_ratio": -0.826,
+      "max_drawdown_pct": 2.27,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 51,
+          "win_rate": 29.411764705882355,
+          "pnl": -1.5005707607190848,
+          "fees": 0.359570394998982
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 79.1755,
+      "total_return_pct": -1.03,
+      "total_pnl": -0.8245,
+      "total_fees": 0.0792,
+      "fees_pct_of_gross": 7.36,
+      "n_trades": 9,
+      "win_rate_pct": 11.11,
+      "profit_factor": 0.133,
+      "avg_win": 0.1261,
+      "avg_loss": 0.1188,
+      "expectancy": -0.0916,
+      "sharpe_ratio": -1.481,
+      "sortino_ratio": -1.533,
+      "calmar_ratio": -0.787,
+      "max_drawdown_pct": 1.31,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 9,
+          "win_rate": 11.11111111111111,
+          "pnl": -0.8244848261700803,
+          "fees": 0.07924946697008001
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 78.571,
+      "total_return_pct": -1.79,
+      "total_pnl": -1.429,
+      "total_fees": 1.1569,
+      "fees_pct_of_gross": 5.54,
+      "n_trades": 171,
+      "win_rate_pct": 40.94,
+      "profit_factor": 0.872,
+      "avg_win": 0.139,
+      "avg_loss": 0.1105,
+      "expectancy": -0.0084,
+      "sharpe_ratio": -0.565,
+      "sortino_ratio": -0.828,
+      "calmar_ratio": -0.611,
+      "max_drawdown_pct": 2.92,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "BTCUSDT": {
+          "trades": 12,
+          "win_rate": 16.666666666666664,
+          "pnl": -1.0199484245431603,
+          "fees": 0.10636253210115917
+        },
+        "SOLUSDT": {
+          "trades": 159,
+          "win_rate": 42.76729559748428,
+          "pnl": -0.40901383194208685,
+          "fees": 1.0505494939309792
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 80.3924,
+      "total_return_pct": 0.49,
+      "total_pnl": 0.3924,
+      "total_fees": 0.5277,
+      "fees_pct_of_gross": 5.75,
+      "n_trades": 58,
+      "win_rate_pct": 48.28,
+      "profit_factor": 1.089,
+      "avg_win": 0.171,
+      "avg_loss": 0.1465,
+      "expectancy": 0.0068,
+      "sharpe_ratio": 0.317,
+      "sortino_ratio": 0.563,
+      "calmar_ratio": 0.471,
+      "max_drawdown_pct": 1.04,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "ETHUSDT": {
+          "trades": 5,
+          "win_rate": 40.0,
+          "pnl": -0.3198880690782375,
+          "fees": 0.08106269347824
+        },
+        "SOLUSDT": {
+          "trades": 53,
+          "win_rate": 49.056603773584904,
+          "pnl": 0.7122826199112141,
+          "fees": 0.44668398589268127
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 78.1559,
+      "total_return_pct": -2.31,
+      "total_pnl": -1.8441,
+      "total_fees": 0.2641,
+      "fees_pct_of_gross": 5.53,
+      "n_trades": 31,
+      "win_rate_pct": 25.81,
+      "profit_factor": 0.443,
+      "avg_win": 0.183,
+      "avg_loss": 0.1438,
+      "expectancy": -0.0595,
+      "sharpe_ratio": -1.587,
+      "sortino_ratio": -1.975,
+      "calmar_ratio": -0.996,
+      "max_drawdown_pct": 2.31,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 31,
+          "win_rate": 25.806451612903224,
+          "pnl": -1.844101445596442,
+          "fees": 0.2640860195157452
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 79.1299,
+      "total_return_pct": -1.09,
+      "total_pnl": -0.8701,
+      "total_fees": 0.3528,
+      "fees_pct_of_gross": 6.04,
+      "n_trades": 39,
+      "win_rate_pct": 33.33,
+      "profit_factor": 0.741,
+      "avg_win": 0.1914,
+      "avg_loss": 0.1292,
+      "expectancy": -0.0223,
+      "sharpe_ratio": -0.617,
+      "sortino_ratio": -0.805,
+      "calmar_ratio": -0.456,
+      "max_drawdown_pct": 2.38,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 39,
+          "win_rate": 33.33333333333333,
+          "pnl": -0.8700736482911058,
+          "fees": 0.35281728818732044
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 78.8849,
+      "total_return_pct": -1.39,
+      "total_pnl": -1.1151,
+      "total_fees": 0.1679,
+      "fees_pct_of_gross": 6.36,
+      "n_trades": 18,
+      "win_rate_pct": 27.78,
+      "profit_factor": 0.406,
+      "avg_win": 0.1525,
+      "avg_loss": 0.1444,
+      "expectancy": -0.062,
+      "sharpe_ratio": -1.906,
+      "sortino_ratio": -1.996,
+      "calmar_ratio": -0.832,
+      "max_drawdown_pct": 1.67,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 18,
+          "win_rate": 27.77777777777778,
+          "pnl": -1.115118458493844,
+          "fees": 0.1679139484125617
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 81.1321,
+      "total_return_pct": 1.42,
+      "total_pnl": 1.1321,
+      "total_fees": 0.5273,
+      "fees_pct_of_gross": 5.3,
+      "n_trades": 46,
+      "win_rate_pct": 45.65,
+      "profit_factor": 1.257,
+      "avg_win": 0.2636,
+      "avg_loss": 0.1762,
+      "expectancy": 0.0246,
+      "sharpe_ratio": 0.602,
+      "sortino_ratio": 0.968,
+      "calmar_ratio": 1.047,
+      "max_drawdown_pct": 1.35,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "ETHUSDT": {
+          "trades": 6,
+          "win_rate": 50.0,
+          "pnl": 0.6524500821141741,
+          "fees": 0.10398901724582399
+        },
+        "SOLUSDT": {
+          "trades": 40,
+          "win_rate": 45.0,
+          "pnl": 0.4796757278022486,
+          "fees": 0.4232715720967137
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 80.0213,
+      "total_return_pct": 0.03,
+      "total_pnl": 0.0213,
+      "total_fees": 0.1211,
+      "fees_pct_of_gross": 5.51,
+      "n_trades": 14,
+      "win_rate_pct": 35.71,
+      "profit_factor": 1.02,
+      "avg_win": 0.2218,
+      "avg_loss": 0.1209,
+      "expectancy": 0.0015,
+      "sharpe_ratio": 0.029,
+      "sortino_ratio": 0.046,
+      "calmar_ratio": 0.021,
+      "max_drawdown_pct": 1.27,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 14,
+          "win_rate": 35.714285714285715,
+          "pnl": 0.02130452497424211,
+          "fees": 0.12109409302576002
+        }
+      },
+      "equity_curve_length": 34936
+    },
+    {
+      "initial_equity": 80.0,
+      "final_equity": 79.9036,
+      "total_return_pct": -0.12,
+      "total_pnl": -0.0964,
+      "total_fees": 0.3228,
+      "fees_pct_of_gross": 5.54,
+      "n_trades": 30,
+      "win_rate_pct": 36.67,
+      "profit_factor": 0.967,
+      "avg_win": 0.2604,
+      "avg_loss": 0.1558,
+      "expectancy": -0.0032,
+      "sharpe_ratio": -0.068,
+      "sortino_ratio": -0.104,
+      "calmar_ratio": -0.056,
+      "max_drawdown_pct": 2.13,
+      "leverage": 10,
+      "symbol_breakdown": {
+        "SOLUSDT": {
+          "trades": 30,
+          "win_rate": 36.666666666666664,
+          "pnl": -0.09635577829583164,
+          "fees": 0.32279736549584004
+        }
+      },
+      "equity_curve_length": 34936
+    }
+  ]
+}

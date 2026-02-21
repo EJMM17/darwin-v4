@@ -105,52 +105,56 @@ class MarketDataLayer:
         """
         Fetch OHLCV candles from Binance.
 
-        Uses cache if data is fresh enough.
+        Uses cache if data is fresh enough. Lock only protects cache dict
+        access, NOT the HTTP call — avoids serializing all symbol fetches.
         """
         cache_key = (symbol, interval)
         now = time.time()
 
+        # Check cache (lock only for dict read)
         with self._lock:
-            # Check cache
             if cache_key in self._cache:
                 ts, candles = self._cache[cache_key]
                 if now - ts < self._cache_ttl_s:
                     return candles
 
-            # Fetch from exchange
-            try:
-                session = self._client._session
-                base_url = self._client._base_url
-                timeout = self._client._timeout_s
+        # HTTP call OUTSIDE the lock — allows parallel fetches per symbol
+        try:
+            session = self._client._session
+            base_url = self._client._base_url
+            timeout = self._client._timeout_s
 
-                response = session.get(
-                    f"{base_url}/fapi/v1/klines",
-                    params={"symbol": symbol, "interval": interval, "limit": limit},
-                    timeout=timeout,
-                )
-                response.raise_for_status()
-                raw = response.json()
+            response = session.get(
+                f"{base_url}/fapi/v1/klines",
+                params={"symbol": symbol, "interval": interval, "limit": limit},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            raw = response.json()
 
-                candles = []
-                for k in raw:
-                    candles.append(OHLCV(
-                        timestamp=int(k[0]),
-                        open=float(k[1]),
-                        high=float(k[2]),
-                        low=float(k[3]),
-                        close=float(k[4]),
-                        volume=float(k[5]),
-                    ))
+            candles = []
+            for k in raw:
+                candles.append(OHLCV(
+                    timestamp=int(k[0]),
+                    open=float(k[1]),
+                    high=float(k[2]),
+                    low=float(k[3]),
+                    close=float(k[4]),
+                    volume=float(k[5]),
+                ))
 
+            # Update cache (lock only for dict write)
+            with self._lock:
                 self._cache[cache_key] = (now, candles)
-                return candles
+            return candles
 
-            except Exception as exc:
-                logger.warning("failed to fetch candles for %s: %s", symbol, exc)
-                # Return cached data if available (stale is better than nothing)
+        except Exception as exc:
+            logger.warning("failed to fetch candles for %s: %s", symbol, exc)
+            # Return stale cached data if available
+            with self._lock:
                 if cache_key in self._cache:
                     return self._cache[cache_key][1]
-                return []
+            return []
 
     def fetch_funding_rate(self, symbol: str) -> float:
         """Fetch the current funding rate for a symbol."""
@@ -255,7 +259,8 @@ class MarketDataLayer:
 
     def clear_cache(self) -> None:
         """Clear all cached data."""
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
 
 # ── Technical Indicator Functions ─────────────────────────

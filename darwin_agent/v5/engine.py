@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
@@ -54,7 +56,7 @@ class V5EngineConfig:
     heartbeat_interval_ticks: int = 12  # log heartbeat every 12 ticks (60s at 5s interval)
     monte_carlo_interval_ticks: int = 360  # run MC every 30 min
     # Risk
-    leverage: int = 5
+    leverage: int = 10
     base_risk_pct: float = 1.0
     confidence_threshold: float = 0.60
     # Risk per trade — SL dinámico basado en ATR
@@ -128,6 +130,10 @@ class V5EngineState:
     # Kill switch state
     trading_halted: bool = False
     halt_reason: str = ""
+    # Consecutive failure tracking per symbol
+    consecutive_order_failures: dict = field(default_factory=dict)
+    # Midnight carry-over: unrealized loss carried from previous day
+    midnight_unrealized_carry: float = 0.0
 
 
 class DarwinV5Engine:
@@ -236,9 +242,13 @@ class DarwinV5Engine:
                 except Exception as _e:
                     logger.warning("Failed to send daily report: %s", _e)
 
-        self._state.daily_start_equity = self._state.equity
-        self._state.daily_pnl = 0.0
         self._state.open_positions = list(positions)
+
+        # Restore persisted risk state (prevents restart exploit)
+        if not self._load_risk_state():
+            # No persisted state — fresh start
+            self._state.daily_start_equity = self._state.equity
+            self._state.daily_pnl = 0.0
 
         if self._state.equity <= 0:
             raise RuntimeError(f"Equity must be > 0, got {self._state.equity}")
@@ -264,9 +274,6 @@ class DarwinV5Engine:
             logger.info("symbol step sizes loaded: %s", step_sizes)
         except Exception as exc:
             logger.warning("could not load symbol step sizes, using defaults: %s", exc)
-
-        # 6. Initialize position sizer daily tracking
-        self._position_sizer.reset_daily(self._state.equity)
 
         startup = {
             "wallet_balance": self._state.wallet_balance,
@@ -383,9 +390,14 @@ class DarwinV5Engine:
         today = datetime.datetime.now(datetime.timezone.utc).toordinal()
         if self._state.current_day != today:
             self._state.current_day = today
+            # Carry unrealized losses into new day — prevents midnight reset exploit.
+            # If we have open positions at midnight with unrealized losses,
+            # the new baseline accounts for them so the daily kill switch
+            # doesn't give a free pass to already-bleeding positions.
+            unrealized = self._state.unrealized_pnl
+            self._state.midnight_unrealized_carry = min(0.0, unrealized)
             self._state.daily_start_equity = self._state.equity
             self._state.daily_pnl = 0.0
-            self._position_sizer.reset_daily(self._state.equity)
             # Reset daily-scoped halts (max drawdown halt persists across days)
             if self._state.trading_halted and (
                 "daily_loss_limit" in self._state.halt_reason
@@ -397,6 +409,7 @@ class DarwinV5Engine:
                 logger.info("KILL SWITCH reset: new trading day started")
             # Export equity curve CSV at day rollover (institutional audit trail)
             self._export_equity_csv()
+            self._save_risk_state()
             logger.info("daily reset: new equity baseline $%.4f", self._state.equity)
 
         # 2. Manage open positions (SL/TP check) BEFORE new signals
@@ -439,23 +452,6 @@ class DarwinV5Engine:
                 snap = self._analytics.snapshot()
                 if snap and snap.n_trades > 0:
                     logger.info(self._analytics.summary_line())
-                    # Circuit breaker: use equity-based daily PnL (includes unrealized)
-                    effective_daily_pnl = (
-                        self._state.equity - self._state.daily_start_equity
-                    )
-                    breached, reason = self._analytics.circuit_breaker_check(
-                        daily_pnl_usdt=effective_daily_pnl,
-                        daily_start_equity=self._state.daily_start_equity,
-                    )
-                    if breached and not self._state.trading_halted:
-                        self._state.trading_halted = True
-                        self._state.halt_reason = f"circuit_breaker: {reason}"
-                        logger.critical("CIRCUIT BREAKER HALT: %s", reason)
-                        self._telegram.send_message(
-                            f"CIRCUIT BREAKER ACTIVATED: {reason}\n"
-                            f"Equity: ${self._state.equity:.2f}\n"
-                            f"Daily PnL: ${effective_daily_pnl:.2f}"
-                        )
             # Record equity for real-time Sharpe/Sortino/Calmar computation
             self._analytics.record_equity(self._state.equity)
             # Update portfolio risk daily equity (circuit breaker + Kelly)
@@ -547,6 +543,77 @@ class DarwinV5Engine:
         if snap and snap.n_trades >= 5:
             logger.info("DAILY REPORT | %s", self._analytics.summary_line())
 
+    # ── Risk State Persistence ─────────────────────────────────────────
+    RISK_STATE_PATH = "/data/risk_state.json"
+
+    def _save_risk_state(self) -> None:
+        """Persist critical risk state to disk. Survives restarts."""
+        state = {
+            "daily_start_equity": self._state.daily_start_equity,
+            "daily_pnl": self._state.daily_pnl,
+            "peak_equity": self._state.peak_equity,
+            "trading_halted": self._state.trading_halted,
+            "halt_reason": self._state.halt_reason,
+            "current_day": self._state.current_day,
+            "midnight_unrealized_carry": self._state.midnight_unrealized_carry,
+            "saved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        try:
+            os.makedirs(os.path.dirname(self.RISK_STATE_PATH), exist_ok=True)
+            with open(self.RISK_STATE_PATH, "w") as f:
+                json.dump(state, f)
+        except Exception as exc:
+            logger.warning("failed to save risk state: %s", exc)
+
+    def _load_risk_state(self) -> bool:
+        """Load persisted risk state. Returns True if state was restored."""
+        try:
+            with open(self.RISK_STATE_PATH, "r") as f:
+                state = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return False
+
+        saved_day = state.get("current_day", -1)
+        today = datetime.datetime.now(datetime.timezone.utc).toordinal()
+
+        # Only restore same-day state (cross-day resets should still happen)
+        if saved_day == today:
+            self._state.daily_start_equity = state.get("daily_start_equity", 0.0)
+            self._state.daily_pnl = state.get("daily_pnl", 0.0)
+            self._state.current_day = saved_day
+            self._state.midnight_unrealized_carry = state.get(
+                "midnight_unrealized_carry", 0.0
+            )
+            logger.info(
+                "risk state restored: daily_start=$%.2f halted=%s",
+                self._state.daily_start_equity,
+                state.get("trading_halted", False),
+            )
+
+        # Peak equity and halt state persist across days
+        saved_peak = state.get("peak_equity", 0.0)
+        if saved_peak > 0:
+            self._state.peak_equity = max(self._state.peak_equity, saved_peak)
+
+        if state.get("trading_halted", False):
+            halt_reason = state.get("halt_reason", "")
+            # Max drawdown halt persists across restarts
+            if "max_drawdown" in halt_reason:
+                self._state.trading_halted = True
+                self._state.halt_reason = halt_reason
+                logger.critical(
+                    "RISK STATE RESTORED: trading halted — %s", halt_reason
+                )
+            # Daily halts only persist within the same day
+            elif saved_day == today:
+                self._state.trading_halted = True
+                self._state.halt_reason = halt_reason
+                logger.critical(
+                    "RISK STATE RESTORED: trading halted — %s", halt_reason
+                )
+
+        return True
+
     async def _check_kill_switches(self) -> None:
         """
         Institutional kill switches: halt trading if risk limits are breached.
@@ -571,6 +638,10 @@ class DarwinV5Engine:
         daily_start = self._state.daily_start_equity
 
         # ── Trigger 1: Daily loss limit ──────────────────────────────────
+        # Include midnight carry-over: if positions were underwater at midnight,
+        # their unrealized loss is already baked into daily_start_equity via
+        # equity = wallet + unrealized, but we also track the carry separately
+        # to prevent restart exploits (see risk state persistence).
         if daily_start > 0:
             daily_loss_pct = (daily_start - equity) / daily_start * 100.0
             if daily_loss_pct >= cfg.max_daily_loss_pct:
@@ -590,6 +661,7 @@ class DarwinV5Engine:
                     "KILL SWITCH: daily loss limit breached %.2f%% (limit=%.1f%%)",
                     daily_loss_pct, cfg.max_daily_loss_pct,
                 )
+                self._save_risk_state()
                 return
 
         # ── Trigger 2: Max drawdown from peak ────────────────────────────
@@ -615,6 +687,26 @@ class DarwinV5Engine:
                     "KILL SWITCH: max drawdown breached %.2f%% from peak $%.2f (limit=%.1f%%)",
                     drawdown_pct, self._state.peak_equity, cfg.max_drawdown_kill_pct,
                 )
+                self._save_risk_state()
+                return
+
+        # ── Trigger 3: Circuit breaker (loss streak + analytics DD) ──────
+        # Runs every tick, not just at heartbeat — catches flash crashes fast.
+        effective_daily_pnl = equity - self._state.daily_start_equity
+        breached, reason = self._analytics.circuit_breaker_check(
+            daily_pnl_usdt=effective_daily_pnl,
+            daily_start_equity=self._state.daily_start_equity,
+        )
+        if breached:
+            self._state.trading_halted = True
+            self._state.halt_reason = f"circuit_breaker: {reason}"
+            logger.critical("CIRCUIT BREAKER HALT: %s", reason)
+            self._telegram.send_message(
+                f"CIRCUIT BREAKER ACTIVATED: {reason}\n"
+                f"Equity: ${equity:.2f}\n"
+                f"Daily PnL: ${effective_daily_pnl:.2f}"
+            )
+            self._save_risk_state()
 
     async def _manage_open_positions(self, positions: list) -> None:
         """
@@ -990,6 +1082,10 @@ class DarwinV5Engine:
             for p in self._state.open_positions
         )
 
+        # Use equity-based daily PnL (realized + unrealized) — single source of truth
+        # This matches what the circuit breaker and kill switches use.
+        effective_daily_pnl = self._state.equity - self._state.daily_start_equity
+
         size_result = self._position_sizer.compute(
             equity=self._state.equity,
             price=features.close,
@@ -1000,7 +1096,7 @@ class DarwinV5Engine:
             current_exposure=current_exposure,
             step_size=self._symbol_step_sizes.get(symbol, 0.0),
             risk_pct_override=effective_risk_pct,
-            daily_pnl=self._state.daily_pnl,
+            daily_pnl=effective_daily_pnl,
             daily_start_equity=self._state.daily_start_equity,
         )
 
@@ -1036,16 +1132,31 @@ class DarwinV5Engine:
             order, dry_run=self._config.dry_run
         )
 
-        # Always record trade tick for throttle — prevents spam on repeated failures
-        self._state.last_trade_tick[symbol] = self._state.tick_count
-
         if result.success:
+            # Only throttle on success — failed orders should be retried next tick
+            self._state.last_trade_tick[symbol] = self._state.tick_count
+            self._state.consecutive_order_failures[symbol] = 0
             logger.info(
                 "order filled: %s %s qty=%.6f price=%.2f slippage=%.1fbps",
                 side, symbol, result.filled_qty, result.avg_price, result.slippage_bps,
             )
         else:
-            logger.warning("order failed: %s %s error=%s", side, symbol, result.error)
+            # Track consecutive failures per symbol — escalate if persistent
+            failures = self._state.consecutive_order_failures.get(symbol, 0) + 1
+            self._state.consecutive_order_failures[symbol] = failures
+            logger.warning(
+                "order failed (%d consecutive): %s %s error=%s",
+                failures, side, symbol, result.error,
+            )
+            if failures >= 3:
+                self._telegram.send_message(
+                    f"ORDER FAILURE ALERT: {symbol} {failures} consecutive failures\n"
+                    f"Last error: {result.error}"
+                )
+            if failures >= 5:
+                # After 5 consecutive failures, apply short cooldown to avoid spam
+                # but still much shorter than the full ranging cooldown
+                self._state.last_trade_tick[symbol] = self._state.tick_count
 
     def get_diagnostics(self) -> Dict[str, Any]:
         """Return comprehensive diagnostics for all modules."""

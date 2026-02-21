@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import math as _math
 from dataclasses import dataclass
 from typing import Any, Dict
 
@@ -25,7 +26,7 @@ logger = logging.getLogger("darwin.v5.position_sizer")
 class SizerConfig:
     """Configuration for dynamic position sizing."""
     base_risk_pct: float = 1.0          # base risk per trade (1% of equity)
-    leverage: int = 5                    # max leverage
+    leverage: int = 10                   # max leverage
     # Volatility scaling
     target_vol: float = 0.02            # target annualized vol (2%)
     vol_scale_min: float = 0.5          # minimum vol scaling factor (floor para capital pequeño)
@@ -40,7 +41,7 @@ class SizerConfig:
     # Per-symbol exposure cap
     max_symbol_exposure_pct: float = 20.0  # max 20% of equity per symbol
     # Total portfolio exposure
-    max_total_exposure_mult: float = 5.0  # max 5x leverage total
+    max_total_exposure_mult: float = 10.0  # max 10x leverage total
     # Min notional
     min_notional_usdt: float = 5.5      # Binance min es $5, +$0.5 de margen por slippage
     # Half-Kelly adaptive sizing
@@ -102,11 +103,6 @@ class PositionSizer:
     def __init__(self, config: SizerConfig | None = None) -> None:
         self._config = config or SizerConfig()
         self._trade_pnls: list = []      # historial completo de PnL para Kelly Criterion
-
-    def reset_daily(self, equity: float) -> None:
-        """Reset daily tracking (call at start of each day). Kept for Kelly context."""
-        pass
-
 
     def _compute_kelly_scale(self, cfg: SizerConfig) -> float:
         """
@@ -283,10 +279,7 @@ class PositionSizer:
         quantity = position_size / price
 
         # Apply step_size rounding BEFORE notional check.
-        # Bug: validating notional on raw quantity (e.g. 0.000167 BTC = $16 OK),
-        # then rounding in execution_engine makes it 0.000 BTC = $0 → Binance error.
-        # Fix: round here so the check uses the actual quantity that will be sent.
-        import math as _math
+        # Without this, notional passes on raw qty but rounds to 0 in execution.
         if step_size > 0:
             quantity = _math.floor(quantity / step_size) * step_size
 

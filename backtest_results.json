@@ -1,0 +1,28 @@
+{
+  "initial_equity": 80.0,
+  "final_equity": 78.6412,
+  "total_return_pct": -1.7,
+  "total_pnl": -1.3588,
+  "total_fees": 0.3035,
+  "fees_pct_of_gross": 5.98,
+  "n_trades": 30,
+  "win_rate_pct": 33.33,
+  "profit_factor": 0.578,
+  "avg_win": 0.1857,
+  "avg_loss": 0.1608,
+  "expectancy": -0.0453,
+  "sharpe_ratio": -1.149,
+  "sortino_ratio": -1.263,
+  "calmar_ratio": -0.75,
+  "max_drawdown_pct": 2.26,
+  "leverage": 10,
+  "symbol_breakdown": {
+    "SOLUSDT": {
+      "trades": 30,
+      "win_rate": 33.33333333333333,
+      "pnl": -1.3588321777036767,
+      "fees": 0.30348321890368
+    }
+  },
+  "equity_curve_length": 34936
+}
