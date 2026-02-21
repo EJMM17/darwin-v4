@@ -69,6 +69,17 @@ class PerformanceSnapshot:
     scalable: bool = False
     computed_at: float = field(default_factory=time.time)
 
+    def to_log(self) -> str:
+        """One-line summary for periodic heartbeat logging."""
+        return (
+            f"PERF | trades={self.total_trades} WR={self.win_rate:.1%} "
+            f"PF={self.profit_factor:.2f} PnL=${self.total_pnl:.2f} "
+            f"Sharpe={self.sharpe_ratio:.2f} Sortino={self.sortino_ratio:.2f} "
+            f"Calmar={self.calmar_ratio:.2f} DD={self.current_drawdown:.1%} "
+            f"maxDD={self.max_drawdown:.1%} Kelly={self.half_kelly_pct:.1f}% "
+            f"grade={self.grade}"
+        )
+
 
 class PerformanceAnalytics:
     """
