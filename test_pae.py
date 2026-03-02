@@ -8,7 +8,7 @@ from darwin_agent.portfolio.allocation_engine import (
 passed = 0
 failed = 0
 
-def test(name, condition):
+def _check(name, condition):
     global passed, failed
     if condition:
         passed += 1
@@ -20,9 +20,9 @@ def test(name, condition):
 
 pae = PortfolioAllocationEngine(["BTC", "SOL", "DOGE"])
 w = pae.get_weights()
-test("init_equal_weights", abs(w["BTC"] - 1/3) < 1e-6)
-test("init_sum_to_one", abs(sum(w.values()) - 1.0) < 1e-6)
-test("init_bar_zero", pae.bar == 0)
+_check("init_equal_weights", abs(w["BTC"] - 1/3) < 1e-6)
+_check("init_sum_to_one", abs(sum(w.values()) - 1.0) < 1e-6)
+_check("init_bar_zero", pae.bar == 0)
 
 # ── 2. Warmup: equal weights during warmup ──────────────────
 
@@ -31,8 +31,8 @@ for i in range(5):
     pae2.update("A", equity=100 + i * 5, pnl=2.0)
     pae2.update("B", equity=100 - i * 2, pnl=-1.0)
     w = pae2.step()
-test("warmup_equal", abs(w["A"] - 0.5) < 1e-6)
-test("warmup_equal_b", abs(w["B"] - 0.5) < 1e-6)
+_check("warmup_equal", abs(w["A"] - 0.5) < 1e-6)
+_check("warmup_equal_b", abs(w["B"] - 0.5) < 1e-6)
 
 # ── 3. After warmup: dynamic allocation ─────────────────────
 
@@ -47,10 +47,10 @@ for i in range(30):
     pae3.step()
 
 w3 = pae3.get_weights()
-test("winner_gets_more", w3["WIN"] > w3["LOSE"])
-test("sum_to_one_dynamic", abs(sum(w3.values()) - 1.0) < 1e-6)
-test("min_floor_respected", w3["LOSE"] >= 0.10 - 1e-6)
-test("max_ceil_respected", w3["WIN"] <= 0.60 + 1e-6)
+_check("winner_gets_more", w3["WIN"] > w3["LOSE"])
+_check("sum_to_one_dynamic", abs(sum(w3.values()) - 1.0) < 1e-6)
+_check("min_floor_respected", w3["LOSE"] >= 0.10 - 1e-6)
+_check("max_ceil_respected", w3["WIN"] <= 0.60 + 1e-6)
 
 # ── 4. Constraint enforcement ────────────────────────────────
 
@@ -67,10 +67,10 @@ for i in range(20):
     pae4.step()
 
 w4 = pae4.get_weights()
-test("max_weight_clamped", w4["A"] <= 0.50 + 1e-6)
-test("min_weight_b", w4["B"] >= 0.15 - 1e-6)
-test("min_weight_c", w4["C"] >= 0.15 - 1e-6)
-test("constraint_sum", abs(sum(w4.values()) - 1.0) < 1e-6)
+_check("max_weight_clamped", w4["A"] <= 0.50 + 1e-6)
+_check("min_weight_b", w4["B"] >= 0.15 - 1e-6)
+_check("min_weight_c", w4["C"] >= 0.15 - 1e-6)
+_check("constraint_sum", abs(sum(w4.values()) - 1.0) < 1e-6)
 
 # ── 5. Determinism ───────────────────────────────────────────
 
@@ -89,15 +89,15 @@ def run_determinism():
     return results
 
 d = run_determinism()
-test("determinism_x", abs(d[0]["X"] - d[1]["X"]) < 1e-12)
-test("determinism_y", abs(d[0]["Y"] - d[1]["Y"]) < 1e-12)
+_check("determinism_x", abs(d[0]["X"] - d[1]["X"]) < 1e-12)
+_check("determinism_y", abs(d[0]["Y"] - d[1]["Y"]) < 1e-12)
 
 # ── 6. Capital allocation ───────────────────────────────────
 
 pae6 = PortfolioAllocationEngine(["A", "B"])
 alloc = pae6.get_capital_allocation(1000.0)
-test("capital_sum", abs(alloc["A"] + alloc["B"] - 1000.0) < 1e-6)
-test("capital_equal", abs(alloc["A"] - 500.0) < 1e-6)
+_check("capital_sum", abs(alloc["A"] + alloc["B"] - 1000.0) < 1e-6)
+_check("capital_equal", abs(alloc["A"] - 500.0) < 1e-6)
 
 # ── 7. EMA smoothing ────────────────────────────────────────
 
@@ -118,8 +118,8 @@ for i in range(50):
 # With low alpha (0.02), weights should be smooth, not flip instantly
 w7 = pae7.get_weights()
 # FAST had recent losses but EMA should still retain some historical allocation
-test("ema_smooth_not_extreme", w7["FAST"] > 0.15)
-test("ema_sum", abs(sum(w7.values()) - 1.0) < 1e-6)
+_check("ema_smooth_not_extreme", w7["FAST"] > 0.15)
+_check("ema_sum", abs(sum(w7.values()) - 1.0) < 1e-6)
 
 # ── 8. Edge: all symbols equal ───────────────────────────────
 
@@ -133,28 +133,28 @@ for i in range(20):
     pae8.step()
 
 w8 = pae8.get_weights()
-test("equal_perf_equal_w", abs(w8["A"] - w8["B"]) < 0.05)
-test("equal_perf_equal_w2", abs(w8["B"] - w8["C"]) < 0.05)
+_check("equal_perf_equal_w", abs(w8["A"] - w8["B"]) < 0.05)
+_check("equal_perf_equal_w2", abs(w8["B"] - w8["C"]) < 0.05)
 
 # ── 9. Score formula edge cases ──────────────────────────────
 
 from darwin_agent.portfolio.allocation_engine import PortfolioAllocationEngine as PAE
 # Negative return → score = 0
 m = {"return": -0.05, "maxdd": 0.10, "pf": 1.2, "volatility": 0.01}
-test("neg_return_zero_score", PAE._compute_score(m) == 0.0)
+_check("neg_return_zero_score", PAE._compute_score(m) == 0.0)
 
 # Zero volatility floored
 m2 = {"return": 0.10, "maxdd": 0.05, "pf": 2.0, "volatility": 0.001}
 s2 = PAE._compute_score(m2)
-test("score_positive", s2 > 0)
+_check("score_positive", s2 > 0)
 
 # ── 10. Min 2 symbols requirement ────────────────────────────
 
 try:
     PortfolioAllocationEngine(["ONLY_ONE"])
-    test("min_symbols_error", False)
+    _check("min_symbols_error", False)
 except ValueError:
-    test("min_symbols_error", True)
+    _check("min_symbols_error", True)
 
 # ── Results ──────────────────────────────────────────────────
 
