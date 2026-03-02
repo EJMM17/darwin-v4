@@ -56,7 +56,7 @@ def test_trade_close_triggers_telegram_message(monkeypatch):
     notifier.notify_trade_closed("BTCUSDT", 105.0, 10.0, 1010.0)
 
     assert "🔴 TRADE CLOSED" in sent[0]
-    assert "New Equity: 1010.0" in sent[0]
+    assert "New Equity: $1010.00" in sent[0]
 
 
 def test_invalid_api_key_aborts_before_trading(monkeypatch):

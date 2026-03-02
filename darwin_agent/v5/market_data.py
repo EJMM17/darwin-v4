@@ -432,43 +432,17 @@ def _realized_vol(returns: List[float], period: int) -> float:
 
 def _roc(closes: List[float], period: int) -> float:
     """
-    Normalized rate of change over period.
+    Rate of change over N periods.
 
-    Kakushadze & Serur §18.2 eq.524: R̂(t) = [R(t) - R̄(t,T)] / σ(t,T)
+    Classic ROC: (close[-1] - close[-period-1]) / close[-period-1]
 
-    Normalizes the current bar return by the mean and std of bar returns
-    over the lookback window, making momentum scale-invariant across
-    volatility regimes. A 2%% move in a low-vol regime and a 2%% move in
-    a high-vol regime now carry different weights, preventing false signals
-    when the market transitions between regimes.
+    Returns the fractional price change over the lookback window.
+    Z-score normalization is applied upstream by the signal generator's
+    _standardize() to avoid double-normalization.
     """
     if len(closes) <= period or closes[-period - 1] == 0:
         return 0.0
-
-    # Compute rolling single-bar returns over the window for normalization
-    window = closes[-(period + 1):]  # period+1 prices -> period returns
-    if len(window) < 3:
-        # fallback: raw return
-        return (closes[-1] - closes[-period - 1]) / closes[-period - 1]
-
-    bar_returns = [
-        (window[i] - window[i - 1]) / window[i - 1]
-        for i in range(1, len(window))
-        if window[i - 1] != 0
-    ]
-    if len(bar_returns) < 2:
-        return (closes[-1] - closes[-period - 1]) / closes[-period - 1]
-
-    mu = sum(bar_returns) / len(bar_returns)
-    variance = sum((r - mu) ** 2 for r in bar_returns) / len(bar_returns)
-    sigma = variance ** 0.5
-
-    if sigma < 1e-10:
-        return 0.0  # flat market, no meaningful signal
-
-    # Normalize the most recent bar return vs the period distribution
-    current_bar = (closes[-1] - closes[-2]) / closes[-2] if closes[-2] != 0 else 0.0
-    return (current_bar - mu) / sigma
+    return (closes[-1] - closes[-period - 1]) / closes[-period - 1]
 
 
 def _z_score(closes: List[float], period: int) -> float:
