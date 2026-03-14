@@ -82,6 +82,9 @@ class SignalConfig:
     # Signal gating
     min_adx_for_momentum: float = 20.0
     max_adx_for_mean_reversion: float = 25.0
+    # Robust normalization
+    winsorize_quantile: float = 0.05
+    use_robust_zscore: bool = True
 
 
 class SignalGenerator:
@@ -158,12 +161,16 @@ class SignalGenerator:
         # Update history and compute z-scores
         z_scores = {}
         for factor_name, value in raw_factors.items():
-            self._factor_history[factor_name].append(value)
-            if len(self._factor_history[factor_name]) > self._max_history:
-                self._factor_history[factor_name] = self._factor_history[factor_name][-self._max_history:]
+            hist = self._factor_history[factor_name]
             z_scores[factor_name] = _standardize(
-                value, self._factor_history[factor_name]
+                value,
+                hist,
+                winsorize_q=cfg.winsorize_quantile,
+                use_robust=cfg.use_robust_zscore,
             )
+            hist.append(value)
+            if len(hist) > self._max_history:
+                self._factor_history[factor_name] = hist[-self._max_history:]
 
         # Apply regime gating to weights
         weights = self._get_regime_weights(regime, cfg)
@@ -516,16 +523,73 @@ class SignalGenerator:
 
 # ── Helper Functions ──────────────────────────────────────
 
-def _standardize(value: float, history: List[float]) -> float:
-    """Standardize a value against its history (z-score)."""
+def _standardize(
+    value: float,
+    history: List[float],
+    winsorize_q: float = 0.05,
+    use_robust: bool = True,
+) -> float:
+    """Standardize a value against its history using robust statistics."""
     if len(history) < 10:
         return 0.0
-    mu = sum(history) / len(history)
-    var = sum((v - mu) ** 2 for v in history) / len(history)
+
+    clipped_hist = _winsorize(history, winsorize_q)
+    clipped_value = _clip_to_quantiles(value, clipped_hist, winsorize_q)
+
+    mu = sum(clipped_hist) / len(clipped_hist)
+    var = sum((v - mu) ** 2 for v in clipped_hist) / len(clipped_hist)
     std = math.sqrt(var)
+
+    if use_robust:
+        med = _median(clipped_hist)
+        abs_dev = [abs(v - med) for v in clipped_hist]
+        mad = _median(abs_dev)
+        robust_std = 1.4826 * mad
+        std = max(std, robust_std)
+
     if std < 1e-10:
         return 0.0
-    return (value - mu) / std
+    return (clipped_value - mu) / std
+
+
+def _clip_to_quantiles(value: float, values: List[float], q: float) -> float:
+    """Clip a value to the [q, 1-q] quantile range of values."""
+    if not values:
+        return value
+    low = _quantile(values, q)
+    high = _quantile(values, 1.0 - q)
+    return max(low, min(high, value))
+
+
+def _winsorize(values: List[float], q: float) -> List[float]:
+    """Winsorize values at q and 1-q quantiles."""
+    if not values:
+        return values
+    low = _quantile(values, q)
+    high = _quantile(values, 1.0 - q)
+    return [max(low, min(high, v)) for v in values]
+
+
+def _quantile(values: List[float], q: float) -> float:
+    """Empirical quantile with linear interpolation."""
+    if not values:
+        return 0.0
+    q = max(0.0, min(1.0, q))
+    s = sorted(values)
+    if len(s) == 1:
+        return s[0]
+    pos = q * (len(s) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return s[lo]
+    weight = pos - lo
+    return s[lo] * (1.0 - weight) + s[hi] * weight
+
+
+def _median(values: List[float]) -> float:
+    """Median helper."""
+    return _quantile(values, 0.5)
 
 
 def _sigmoid(x: float) -> float:
