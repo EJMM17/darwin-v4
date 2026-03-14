@@ -19,6 +19,7 @@ from darwin_agent.v5.signal_generator import (
     SignalGenerator,
     SignalConfig,
     TradeSignal,
+    _standardize,
 )
 from darwin_agent.v5.regime_detector import RegimeState, Regime
 
@@ -224,3 +225,17 @@ class TestSignalConfig:
             + config.funding_carry_weight
         )
         assert abs(total - 1.0) < 1e-6
+
+
+class TestRobustStandardization:
+    def test_standardize_uses_history_without_lookahead(self):
+        """Current value should be scored against prior history only."""
+        history = [0.0] * 20
+        z = _standardize(5.0, history, winsorize_q=0.05, use_robust=False)
+        assert z == 0.0
+
+    def test_winsorization_reduces_outlier_impact(self):
+        """Extreme outliers should have bounded influence on z-score."""
+        history = [0.1] * 20 + [1000.0]
+        z = _standardize(0.12, history, winsorize_q=0.05, use_robust=True)
+        assert abs(z) < 2.0
